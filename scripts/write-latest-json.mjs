@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 
-const repo = "HSU-LEE/OrcaCode";
+const repo = "OrcaCodeAgent/OrcaCode";
 const version = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
 const tag = process.env.GITHUB_REF_NAME ?? `v${version}`;
 if (tag !== `v${version}`) {
