@@ -16,7 +16,7 @@ function onDarkBackground(el: HTMLElement): boolean {
   return true;
 }
 
-export function Logo({ className, label = "Orca Code" }: { className?: string; label?: string }) {
+export function Logo({ className, label = "Orca" }: { className?: string; label?: string }) {
   const ref = useRef<HTMLSpanElement>(null);
   const [onDark, setOnDark] = useState(true);
 

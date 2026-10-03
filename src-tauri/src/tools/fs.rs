@@ -1,11 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::domain::{FileChange, ToolOutput};
-use crate::safety::paths::{is_critical_path, relative_display, resolve_path, should_skip_dir};
+use crate::safety::paths::{is_critical_path, relative_display, resolve_path, should_skip_entry};
 use crate::safety::truncate::truncate_observation;
 use crate::tools::context::ToolCtx;
 use crate::tools::edit::{apply_replacement, apply_unified_diff, unified_diff, EditError};
@@ -14,36 +15,51 @@ pub fn list_directory(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let raw = args.get("path").and_then(Value::as_str).unwrap_or(".");
     let resolved = match resolve_path(&ctx.workspace, raw) {
         Ok(path) => path,
-        Err(_) => return ToolOutput::fail("경로가 비어 있습니다."),
+        Err(_) => return ToolOutput::fail("The path is empty."),
     };
     if !resolved.path.exists() {
-        return ToolOutput::fail(format!("경로가 없습니다: {}", resolved.path.display()));
+        return ToolOutput::fail(format!("Path does not exist: {}", resolved.path.display()));
     }
     if !resolved.path.is_dir() {
-        return ToolOutput::fail("디렉터리가 아닙니다.");
+        return ToolOutput::fail("Not a directory.");
     }
     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(200).clamp(1, 500) as usize;
     let entries = match fs::read_dir(&resolved.path) {
         Ok(entries) => entries,
-        Err(error) => return ToolOutput::fail(format!("디렉터리를 읽지 못했습니다: {error}")),
+        Err(error) => return ToolOutput::fail(format!("Could not read the directory: {error}")),
     };
     let mut lines = Vec::new();
     let mut count = 0;
+    let mut files = 0;
+    let mut dirs = 0;
     let mut items: Vec<_> = entries.flatten().collect();
     items.sort_by_key(|entry| entry.file_name());
+    let total = items.len();
     for entry in items {
         if count >= limit {
-            lines.push(format!("... {limit}개까지만 표시합니다."));
+            lines.push(format!("... showing {limit} of {total}."));
             break;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        let kind = if entry.path().is_dir() { "dir" } else { "file" };
-        let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
-        lines.push(format!("{kind}\t{size}\t{name}"));
+        let is_dir = entry.path().is_dir();
+        if is_dir {
+            dirs += 1;
+        } else {
+            files += 1;
+        }
+        let kind = if is_dir { "dir" } else { "file" };
+        let meta = entry.metadata().ok();
+        let size = meta.as_ref().map(|meta| meta.len()).unwrap_or(0);
+        let modified = meta
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs().to_string())
+            .unwrap_or_default();
+        lines.push(format!("{kind}\t{size}\t{modified}\t{name}"));
         count += 1;
     }
     ToolOutput::ok(format!(
-        "directory: {}\n{}",
+        "directory: {}\nsummary: files={files} dirs={dirs}\n{}",
         relative_display(&ctx.workspace, &resolved.path),
         lines.join("\n")
     ))
@@ -51,30 +67,35 @@ pub fn list_directory(args: &Value, ctx: &ToolCtx) -> ToolOutput {
 
 pub fn read_file(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(raw) = args.get("path").and_then(Value::as_str) else {
-        return ToolOutput::fail("path가 필요합니다.");
+        return ToolOutput::fail("path is required.");
     };
     let resolved = match resolve_path(&ctx.workspace, raw) {
         Ok(path) => path,
-        Err(_) => return ToolOutput::fail("경로가 비어 있습니다."),
+        Err(_) => return ToolOutput::fail("The path is empty."),
     };
     if !resolved.path.is_file() {
-        return ToolOutput::fail(format!("파일이 없습니다: {}", resolved.path.display()));
+        return ToolOutput::fail(format!("File does not exist: {}", resolved.path.display()));
+    }
+    if let Ok(canonical) = resolved.path.canonicalize() {
+        if crate::safety::paths::is_sensitive_path(&canonical) {
+            return ToolOutput::fail("Sensitive paths are not read.");
+        }
     }
     let metadata = match fs::metadata(&resolved.path) {
         Ok(metadata) => metadata,
-        Err(error) => return ToolOutput::fail(format!("파일을 확인하지 못했습니다: {error}")),
+        Err(error) => return ToolOutput::fail(format!("Could not inspect the file: {error}")),
     };
     if metadata.len() > 2_000_000 {
-        return ToolOutput::fail("2MB보다 큰 파일은 범위 없이 읽지 않습니다. start_line과 end_line으로 나눠 읽으세요.");
+        return ToolOutput::fail("Files larger than 2MB must be read with start_line and end_line.");
     }
     let text = match fs::read(&resolved.path) {
         Ok(bytes) => {
             if bytes.contains(&0) {
-                return ToolOutput::fail("바이너리 파일은 읽지 않습니다.");
+                return ToolOutput::fail("Binary files are not read.");
             }
             String::from_utf8_lossy(&bytes).to_string()
         }
-        Err(error) => return ToolOutput::fail(format!("파일을 읽지 못했습니다: {error}")),
+        Err(error) => return ToolOutput::fail(format!("Could not read the file: {error}")),
     };
     let lines: Vec<&str> = text.split('\n').collect();
     let total = lines.len();
@@ -106,31 +127,31 @@ pub fn read_file(args: &Value, ctx: &ToolCtx) -> ToolOutput {
 
 pub fn write_file(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(raw) = args.get("path").and_then(Value::as_str) else {
-        return ToolOutput::fail("path가 필요합니다.");
+        return ToolOutput::fail("path is required.");
     };
     let Some(content) = args.get("content").and_then(Value::as_str) else {
-        return ToolOutput::fail("content가 필요합니다.");
+        return ToolOutput::fail("content is required.");
     };
     let resolved = match resolve_path(&ctx.workspace, raw) {
         Ok(path) => path,
-        Err(_) => return ToolOutput::fail("경로가 비어 있습니다."),
+        Err(_) => return ToolOutput::fail("The path is empty."),
     };
     if is_critical_path(&resolved.path) || resolved.path == ctx.workspace {
-        return ToolOutput::fail("이 경로는 생성할 수 없습니다.");
+        return ToolOutput::fail("This path cannot be created.");
     }
     if resolved.path.exists() {
-        return ToolOutput::fail("이미 있는 파일입니다. write_file 대신 edit_file을 사용하세요.");
+        return ToolOutput::fail("The file already exists. Use edit_file instead of write_file.");
     }
     if let Err(error) = capture(ctx, &resolved.path) {
         return error;
     }
     if let Some(parent) = resolved.path.parent() {
         if let Err(error) = fs::create_dir_all(parent) {
-            return ToolOutput::fail(format!("상위 폴더를 만들지 못했습니다: {error}"));
+            return ToolOutput::fail(format!("Could not create the parent folder: {error}"));
         }
     }
     if let Err(error) = fs::write(&resolved.path, content) {
-        return ToolOutput::fail(format!("파일을 쓰지 못했습니다: {error}"));
+        return ToolOutput::fail(format!("Could not write the file: {error}"));
     }
     let diff = unified_diff("", content);
     let change = record_change(ctx, &resolved.path, "added", &diff);
@@ -142,35 +163,35 @@ pub fn write_file(args: &Value, ctx: &ToolCtx) -> ToolOutput {
 
 pub fn edit_file(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(raw) = args.get("path").and_then(Value::as_str) else {
-        return ToolOutput::fail("path가 필요합니다.");
+        return ToolOutput::fail("path is required.");
     };
     let resolved = match resolve_path(&ctx.workspace, raw) {
         Ok(path) => path,
-        Err(_) => return ToolOutput::fail("경로가 비어 있습니다."),
+        Err(_) => return ToolOutput::fail("The path is empty."),
     };
     if !resolved.path.is_file() {
-        return ToolOutput::fail("수정할 파일이 없습니다. 새 파일은 write_file을 사용하세요.");
+        return ToolOutput::fail("The file to edit does not exist. Use write_file for a new file.");
     }
     let original = match fs::read_to_string(&resolved.path) {
         Ok(text) => text,
-        Err(error) => return ToolOutput::fail(format!("파일을 읽지 못했습니다: {error}")),
+        Err(error) => return ToolOutput::fail(format!("Could not read the file: {error}")),
     };
     let updated = if let Some(diff) = args.get("diff").and_then(Value::as_str) {
         match apply_unified_diff(&original, diff) {
             Ok(text) => text,
             Err(error) => {
                 return ToolOutput::fail(format!(
-                    "패치를 적용하지 못했습니다: {}. old_string/new_string으로 다시 시도하세요.",
+                    "Could not apply the patch: {}. Try again with old_string and new_string.",
                     edit_message(&error)
                 ))
             }
         }
     } else {
         let Some(old) = args.get("old_string").and_then(Value::as_str) else {
-            return ToolOutput::fail("old_string 또는 diff가 필요합니다.");
+            return ToolOutput::fail("old_string or diff is required.");
         };
         let Some(new) = args.get("new_string").and_then(Value::as_str) else {
-            return ToolOutput::fail("new_string이 필요합니다.");
+            return ToolOutput::fail("new_string is required.");
         };
         let replace_all = args.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
         match apply_replacement(&original, old, new, replace_all) {
@@ -179,13 +200,13 @@ pub fn edit_file(args: &Value, ctx: &ToolCtx) -> ToolOutput {
         }
     };
     if updated == original {
-        return ToolOutput::ok("변경 사항이 없습니다.");
+        return ToolOutput::ok("Nothing changed.");
     }
     if let Err(error) = capture(ctx, &resolved.path) {
         return error;
     }
     if let Err(error) = fs::write(&resolved.path, &updated) {
-        return ToolOutput::fail(format!("파일을 쓰지 못했습니다: {error}"));
+        return ToolOutput::fail(format!("Could not write the file: {error}"));
     }
     let diff = unified_diff(&original, &updated);
     let change = record_change(ctx, &resolved.path, "modified", &diff);
@@ -197,20 +218,20 @@ pub fn edit_file(args: &Value, ctx: &ToolCtx) -> ToolOutput {
 
 pub fn create_directory(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(raw) = args.get("path").and_then(Value::as_str) else {
-        return ToolOutput::fail("path가 필요합니다.");
+        return ToolOutput::fail("path is required.");
     };
     let resolved = match resolve_path(&ctx.workspace, raw) {
         Ok(path) => path,
-        Err(_) => return ToolOutput::fail("경로가 비어 있습니다."),
+        Err(_) => return ToolOutput::fail("The path is empty."),
     };
     if resolved.path == ctx.workspace || is_critical_path(&resolved.path) {
-        return ToolOutput::fail("이 경로는 만들 수 없습니다.");
+        return ToolOutput::fail("This path cannot be created.");
     }
     if let Err(error) = capture(ctx, &resolved.path) {
         return error;
     }
     if let Err(error) = fs::create_dir_all(&resolved.path) {
-        return ToolOutput::fail(format!("디렉터리를 만들지 못했습니다: {error}"));
+        return ToolOutput::fail(format!("Could not create the directory: {error}"));
     }
     let change = record_change(
         ctx,
@@ -234,27 +255,27 @@ pub fn copy_file(args: &Value, ctx: &ToolCtx) -> ToolOutput {
 
 fn transfer(args: &Value, ctx: &ToolCtx, rename: bool) -> ToolOutput {
     let Some(from_raw) = args.get("from").and_then(Value::as_str) else {
-        return ToolOutput::fail("from이 필요합니다.");
+        return ToolOutput::fail("from is required.");
     };
     let Some(to_raw) = args.get("to").and_then(Value::as_str) else {
-        return ToolOutput::fail("to가 필요합니다.");
+        return ToolOutput::fail("to is required.");
     };
     let from = match resolve_path(&ctx.workspace, from_raw) {
         Ok(path) => path,
-        Err(_) => return ToolOutput::fail("from 경로가 비어 있습니다."),
+        Err(_) => return ToolOutput::fail("The from path is empty."),
     };
     let to = match resolve_path(&ctx.workspace, to_raw) {
         Ok(path) => path,
-        Err(_) => return ToolOutput::fail("to 경로가 비어 있습니다."),
+        Err(_) => return ToolOutput::fail("The to path is empty."),
     };
     if !from.path.exists() {
-        return ToolOutput::fail("원본 경로가 없습니다.");
+        return ToolOutput::fail("The source path does not exist.");
     }
     if to.path.exists() && !args.get("overwrite").and_then(Value::as_bool).unwrap_or(false) {
-        return ToolOutput::fail("대상이 이미 있습니다. overwrite를 true로 요청해야 덮어씁니다.");
+        return ToolOutput::fail("The destination already exists. Set overwrite to true to replace it.");
     }
     if is_critical_path(&from.path) || is_critical_path(&to.path) || from.path == ctx.workspace {
-        return ToolOutput::fail("이 경로는 이동하거나 복사할 수 없습니다.");
+        return ToolOutput::fail("This path cannot be moved or copied.");
     }
     if let Err(error) = capture(ctx, &from.path) {
         return error;
@@ -268,13 +289,13 @@ fn transfer(args: &Value, ctx: &ToolCtx, rename: bool) -> ToolOutput {
     }
     if let Some(parent) = to.path.parent() {
         if let Err(error) = fs::create_dir_all(parent) {
-            return ToolOutput::fail(format!("대상 폴더를 만들지 못했습니다: {error}"));
+            return ToolOutput::fail(format!("Could not create the destination folder: {error}"));
         }
     }
     let result = if rename {
         fs::rename(&from.path, &to.path).or_else(|_| {
             if from.path.is_dir() {
-                Err(std::io::Error::other("디렉터리 이동에 실패했습니다."))
+                copy_dir(&from.path, &to.path).and_then(|_| fs::remove_dir_all(&from.path))
             } else {
                 fs::copy(&from.path, &to.path).and_then(|_| fs::remove_file(&from.path))
             }
@@ -285,7 +306,7 @@ fn transfer(args: &Value, ctx: &ToolCtx, rename: bool) -> ToolOutput {
         fs::copy(&from.path, &to.path).map(|_| ())
     };
     if let Err(error) = result {
-        return ToolOutput::fail(format!("파일 작업에 실패했습니다: {error}"));
+        return ToolOutput::fail(format!("The file operation failed: {error}"));
     }
     let kind = if rename { "moved" } else { "added" };
     let diff = format!(
@@ -303,26 +324,26 @@ fn transfer(args: &Value, ctx: &ToolCtx, rename: bool) -> ToolOutput {
 
 pub fn delete_file(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(raw) = args.get("path").and_then(Value::as_str) else {
-        return ToolOutput::fail("path가 필요합니다.");
+        return ToolOutput::fail("path is required.");
     };
     let resolved = match resolve_path(&ctx.workspace, raw) {
         Ok(path) => path,
-        Err(_) => return ToolOutput::fail("경로가 비어 있습니다."),
+        Err(_) => return ToolOutput::fail("The path is empty."),
     };
     if !resolved.path.exists() {
-        return ToolOutput::fail("삭제할 경로가 없습니다.");
+        return ToolOutput::fail("The path to delete does not exist.");
     }
     if resolved.path == ctx.workspace || is_critical_path(&resolved.path) {
-        return ToolOutput::fail("작업 공간 루트와 시스템 경로는 삭제할 수 없습니다.");
+        return ToolOutput::fail("The workspace root and system paths cannot be deleted.");
     }
     if resolved.path.is_dir() {
         let recursive = args.get("recursive").and_then(Value::as_bool).unwrap_or(false);
         if !recursive {
-            return ToolOutput::fail("디렉터리를 지우려면 recursive: true가 필요합니다.");
+            return ToolOutput::fail("Deleting a directory requires recursive: true.");
         }
         let count = WalkDir::new(&resolved.path).into_iter().filter_map(Result::ok).count();
         if count > 200 {
-            return ToolOutput::fail("200개가 넘는 항목은 한 번에 삭제할 수 없습니다.");
+            return ToolOutput::fail("More than 200 items cannot be deleted at once.");
         }
         for entry in WalkDir::new(&resolved.path).into_iter().filter_map(Result::ok) {
             if entry.path().is_file() {
@@ -334,24 +355,27 @@ pub fn delete_file(args: &Value, ctx: &ToolCtx) -> ToolOutput {
         if let Err(error) = capture(ctx, &resolved.path) {
             return error;
         }
-        if let Err(error) = fs::remove_dir_all(&resolved.path) {
-            return ToolOutput::fail(format!("디렉터리를 삭제하지 못했습니다: {error}"));
+        if let Err(error) = move_to_trash(&resolved.path) {
+            return ToolOutput::fail(format!("Could not move the directory to the Trash: {error}"));
         }
     } else {
         if let Err(error) = capture(ctx, &resolved.path) {
             return error;
         }
-        if let Err(error) = fs::remove_file(&resolved.path) {
-            return ToolOutput::fail(format!("파일을 삭제하지 못했습니다: {error}"));
+        if let Err(error) = move_to_trash(&resolved.path) {
+            return ToolOutput::fail(format!("Could not move the file to the Trash: {error}"));
         }
     }
     let change = record_change(
         ctx,
         &resolved.path,
         "deleted",
-        &format!("deleted {}", relative_display(&ctx.workspace, &resolved.path)),
+        &format!("trashed {}", relative_display(&ctx.workspace, &resolved.path)),
     );
-    let mut output = ToolOutput::ok(format!("deleted {}", relative_display(&ctx.workspace, &resolved.path)));
+    let mut output = ToolOutput::ok(format!(
+        "trashed {}",
+        relative_display(&ctx.workspace, &resolved.path)
+    ));
     output.file_changes = vec![change];
     output.mutated = true;
     output
@@ -359,7 +383,7 @@ pub fn delete_file(args: &Value, ctx: &ToolCtx) -> ToolOutput {
 
 pub fn search_files(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(query) = args.get("query").and_then(Value::as_str) else {
-        return ToolOutput::fail("query가 필요합니다.");
+        return ToolOutput::fail("query is required.");
     };
     let root = search_root(args, ctx);
     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(100).clamp(1, 300) as usize;
@@ -375,7 +399,7 @@ pub fn search_files(args: &Value, ctx: &ToolCtx) -> ToolOutput {
         }
     }
     if matches.is_empty() {
-        ToolOutput::ok("일치하는 파일이 없습니다.")
+        ToolOutput::ok("No matching files.")
     } else {
         ToolOutput::ok(matches.join("\n"))
     }
@@ -383,10 +407,10 @@ pub fn search_files(args: &Value, ctx: &ToolCtx) -> ToolOutput {
 
 pub fn search_text(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(query) = args.get("query").and_then(Value::as_str) else {
-        return ToolOutput::fail("query가 필요합니다.");
+        return ToolOutput::fail("query is required.");
     };
     if query.is_empty() {
-        return ToolOutput::fail("query가 비어 있습니다.");
+        return ToolOutput::fail("query is empty.");
     }
     let root = search_root(args, ctx);
     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(80).clamp(1, 200) as usize;
@@ -401,6 +425,11 @@ pub fn search_text(args: &Value, ctx: &ToolCtx) -> ToolOutput {
         }
         if crate::safety::paths::is_sensitive_path(entry.path()) {
             continue;
+        }
+        if let Ok(canonical) = entry.path().canonicalize() {
+            if crate::safety::paths::is_sensitive_path(&canonical) {
+                continue;
+            }
         }
         let Ok(metadata) = entry.metadata() else { continue };
         if metadata.len() > 1_000_000 {
@@ -431,7 +460,7 @@ pub fn search_text(args: &Value, ctx: &ToolCtx) -> ToolOutput {
         }
     }
     let body = if matches.is_empty() {
-        "일치하는 문자열이 없습니다.".to_string()
+        "No matching text.".to_string()
     } else {
         matches.join("\n")
     };
@@ -451,13 +480,7 @@ fn walk(root: &Path) -> Vec<walkdir::DirEntry> {
     WalkDir::new(root)
         .max_depth(8)
         .into_iter()
-        .filter_entry(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .map(|name| !should_skip_dir(name))
-                .unwrap_or(false)
-        })
+        .filter_entry(|entry| !should_skip_entry(entry.path(), root))
         .filter_map(Result::ok)
         .take(20_000)
         .collect()
@@ -485,6 +508,30 @@ fn simple_glob(pattern: &str, text: &str) -> bool {
         &pattern.chars().collect::<Vec<_>>(),
         &text.chars().collect::<Vec<_>>(),
     )
+}
+
+fn move_to_trash(path: &Path) -> std::io::Result<()> {
+    let Some(home) = dirs::home_dir() else {
+        return if path.is_dir() {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_file(path)
+        };
+    };
+    let trash = home.join(".Trash");
+    fs::create_dir_all(&trash)?;
+    let name = path.file_name().unwrap_or_default();
+    let mut dest = trash.join(name);
+    if dest.exists() {
+        dest = trash.join(format!("{}-{}", crate::util::new_id(), name.to_string_lossy()));
+    }
+    fs::rename(path, &dest).or_else(|_| {
+        if path.is_dir() {
+            copy_dir(path, &dest).and_then(|_| fs::remove_dir_all(path))
+        } else {
+            fs::copy(path, &dest).and_then(|_| fs::remove_file(path))
+        }
+    })
 }
 
 fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -519,9 +566,9 @@ fn record_change(ctx: &ToolCtx, path: &Path, kind: &str, diff: &str) -> FileChan
 
 fn edit_message(error: &EditError) -> String {
     match error {
-        EditError::EmptyOld => "old_string이 비어 있습니다.".into(),
-        EditError::NotFound => "old_string과 일치하는 내용이 없습니다. 파일을 다시 읽고 정확히 복사하세요.".into(),
-        EditError::Ambiguous(count) => format!("old_string이 {count}번 등장합니다. 더 긴 문맥을 포함하세요."),
-        EditError::Patch(message) => format!("diff 오류: {message}"),
+        EditError::EmptyOld => "old_string is empty.".into(),
+        EditError::NotFound => "old_string does not match the file. Read the file again and copy it exactly.".into(),
+        EditError::Ambiguous(count) => format!("old_string appears {count} times. Include more surrounding context."),
+        EditError::Patch(message) => format!("diff error: {message}"),
     }
 }

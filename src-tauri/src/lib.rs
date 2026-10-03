@@ -37,12 +37,23 @@ pub fn run() {
                 processes: std::sync::Arc::new(ProcessManager::new()),
                 ollama,
                 host: ollama::host::OllamaHost::new(),
+                keep_alive: std::sync::atomic::AtomicBool::new(false),
             });
             let handle = app.handle().clone();
             if let Some(window) = app.get_webview_window("main") {
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
+                        let keep = handle
+                            .try_state::<AppState>()
+                            .map(|state| state.keep_alive.load(std::sync::atomic::Ordering::SeqCst))
+                            .unwrap_or(false);
+                        if keep {
+                            if let Some(window) = handle.get_webview_window("main") {
+                                let _ = window.hide();
+                            }
+                            return;
+                        }
                         if let Some(state) = handle.try_state::<AppState>() {
                             state.host.shutdown();
                         }
@@ -69,6 +80,7 @@ pub fn run() {
             commands::ollama_models,
             commands::ollama_present,
             commands::pull_ollama_model,
+            commands::unload_ollama_model,
             commands::install_ollama,
             commands::bootstrap_runtime,
             commands::ensure_ollama_server,
@@ -80,12 +92,21 @@ pub fn run() {
             commands::respond_permission,
             commands::undo_task,
             commands::cancel_task,
+            commands::computer_home,
+            commands::computer_desktop,
+            commands::set_runs_in_background,
             commands::start_task,
         ])
         .build(tauri::generate_context!())
         .expect("Orca Code failed to start")
         .run(|app, event| {
             use tauri::Manager;
+            if let tauri::RunEvent::Reopen { .. } = &event {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
             if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.host.shutdown();

@@ -30,16 +30,13 @@ pub fn run_command(
     cancel: &CancelFlag,
 ) -> CommandOutput {
     if command.trim().is_empty() {
-        return failed("빈 명령은 실행할 수 없습니다.");
+        return failed("An empty command cannot run.");
     }
     if command.len() > 20_000 {
-        return failed("명령이 너무 깁니다.");
+        return failed("The command is too long.");
     }
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let mut process = Command::new(shell);
+    let mut process = shell_command(command);
     process
-        .arg("-lc")
-        .arg(command)
         .current_dir(cwd)
         .env("ORCA_AGENT", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -55,7 +52,7 @@ pub fn run_command(
         Ok(child) => child,
         Err(error) => {
             crate::logging::log_line("error", &format!("spawn failed: {error}"));
-            return failed("명령을 시작하지 못했습니다. 셸이 사용 가능한지 확인해주세요.");
+            return failed("Could not start the command. Check that a shell is available.");
         }
     };
     let pid = child.id();
@@ -91,7 +88,7 @@ pub fn run_command(
                     stderr: take_text(&stderr_buf),
                     timed_out: false,
                     cancelled: false,
-                    error: Some(format!("명령 상태를 확인하지 못했습니다: {error}")),
+                    error: Some(format!("Could not check the command status: {error}")),
                 };
             }
         }
@@ -131,7 +128,7 @@ pub fn run_git(workspace: &Path, args: &[String], timeout: Duration, cancel: &Ca
         Ok(child) => child,
         Err(error) => {
             crate::logging::log_line("error", &format!("git spawn: {error}"));
-            return failed("git 명령을 시작하지 못했습니다. git이 설치되어 있는지 확인해주세요.");
+            return failed("Could not start git. Check that git is installed.");
         }
     };
     let pid = child.id();
@@ -165,7 +162,7 @@ pub fn run_git(workspace: &Path, args: &[String], timeout: Duration, cancel: &Ca
                     stderr: String::new(),
                     timed_out: false,
                     cancelled: false,
-                    error: Some(format!("git 실행에 실패했습니다: {error}")),
+                    error: Some(format!("git failed: {error}")),
                 };
             }
         }
@@ -220,6 +217,35 @@ fn take_text(output: &Mutex<String>) -> String {
     output.lock().map(|mut text| std::mem::take(&mut *text)).unwrap_or_default()
 }
 
+pub fn shell_command(command: &str) -> Command {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "cmd".into()
+        } else {
+            "/bin/zsh".into()
+        }
+    });
+    let mut process = Command::new(&shell);
+    if cfg!(windows) {
+        process.args(["/C", command]);
+        return process;
+    }
+    let name = std::path::Path::new(&shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let prelude = match name {
+        "zsh" => "setopt NO_ALIASES; unalias -a >/dev/null 2>&1; true",
+        "bash" => "shopt -u expand_aliases; unalias -a >/dev/null 2>&1; true",
+        _ => "true",
+    };
+    let wrapped = format!(
+        "{prelude}; export PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"; {command}"
+    );
+    process.arg("-lc").arg(wrapped);
+    process
+}
+
 pub fn kill_pid(pid: u32) {
     #[cfg(unix)]
     unsafe {
@@ -229,7 +255,9 @@ pub fn kill_pid(pid: u32) {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status();
     }
 }
 

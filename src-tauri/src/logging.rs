@@ -17,7 +17,7 @@ pub fn init() -> PathBuf {
     if let Ok(mut slot) = LOG_PATH.lock() {
         *slot = Some(path.clone());
     }
-    log_line("info", "Orca Code logger started");
+    log_line("info", "Orca logger started");
     path
 }
 

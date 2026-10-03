@@ -30,6 +30,12 @@ pub struct StartRequest {
     pub effort: String,
     #[serde(default)]
     pub instructions: String,
+    #[serde(default = "default_true")]
+    pub record_user: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize)]
@@ -74,7 +80,7 @@ pub fn list_workspaces(state: State<'_, AppState>) -> AppResult<Vec<WorkspaceRec
 pub fn remember_workspace(state: State<'_, AppState>, path: String) -> AppResult<WorkspaceRecord> {
     let path = path.trim().to_string();
     if path.is_empty() || !std::path::Path::new(&path).is_dir() {
-        return Err(AppError::message("작업 폴더를 찾지 못했습니다."));
+        return Err(AppError::message("Could not find the working folder."));
     }
     let record = state.db.remember_workspace(&path)?;
     let mut settings = state.db.load_settings()?;
@@ -107,18 +113,18 @@ pub fn rename_conversation(state: State<'_, AppState>, id: String, title: String
 pub fn workspace_diff(path: String) -> AppResult<String> {
     let path = path.trim();
     if !std::path::Path::new(path).is_dir() {
-        return Err(AppError::message("작업 폴더를 찾지 못했습니다."));
+        return Err(AppError::message("Could not find the working folder."));
     }
     let output = std::process::Command::new("git")
         .args(["diff", "--no-ext-diff", "--"])
         .current_dir(path)
         .output()
-        .map_err(|error| AppError::message(format!("git diff를 실행하지 못했습니다: {error}")))?;
+        .map_err(|error| AppError::message(format!("Could not run git diff: {error}")))?;
     if !output.status.success() && output.stdout.is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = stderr.trim();
         return Err(AppError::message(if detail.is_empty() {
-            "Git 저장소가 아니거나 diff를 만들지 못했습니다.".into()
+            "This is not a Git repository, or the diff could not be created.".into()
         } else {
             detail.to_string()
         }));
@@ -131,11 +137,11 @@ pub fn create_worktree(repo: String) -> AppResult<String> {
     let repo = repo.trim();
     let repo_path = std::path::Path::new(repo);
     if !repo_path.join(".git").exists() {
-        return Err(AppError::message("Git 저장소에서만 worktree를 만들 수 있습니다."));
+        return Err(AppError::message("A worktree can only be created inside a Git repository."));
     }
     let parent = repo_path
         .parent()
-        .ok_or_else(|| AppError::message("worktree를 둘 상위 폴더가 없습니다."))?;
+        .ok_or_else(|| AppError::message("There is no parent folder for the worktree."))?;
     let folder_name = repo_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -152,7 +158,7 @@ pub fn create_worktree(repo: String) -> AppResult<String> {
         .arg(&dest)
         .current_dir(repo_path)
         .output()
-        .map_err(|error| AppError::message(format!("git worktree를 만들지 못했습니다: {error}")))?;
+        .map_err(|error| AppError::message(format!("Could not create the git worktree: {error}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AppError::message(stderr.trim().to_string()));
@@ -164,7 +170,7 @@ pub fn create_worktree(repo: String) -> AppResult<String> {
 pub fn open_external_url(url: String) -> AppResult<()> {
     let url = url.trim();
     if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(AppError::message("http 또는 https 주소만 열 수 있습니다."));
+        return Err(AppError::message("Only http or https addresses can be opened."));
     }
     let status = std::process::Command::new("open")
         .arg(url)
@@ -173,7 +179,7 @@ pub fn open_external_url(url: String) -> AppResult<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(AppError::message("주소를 열지 못했습니다."))
+        Err(AppError::message("Could not open the address."))
     }
 }
 
@@ -187,6 +193,16 @@ pub async fn ollama_status(state: State<'_, AppState>) -> Result<crate::ollama::
 pub async fn ollama_models(state: State<'_, AppState>) -> Result<Vec<String>, AppError> {
     let settings = state.db.load_settings()?;
     state.ollama.models(&settings.ollama_url).await
+}
+
+#[tauri::command]
+pub async fn unload_ollama_model(state: State<'_, AppState>, name: String) -> AppResult<()> {
+    let name = name.trim().to_string();
+    if !valid_model_name(&name) {
+        return Err(AppError::message("The model name is not valid."));
+    }
+    let settings = state.db.load_settings()?;
+    state.ollama.unload(&settings.ollama_url, &name).await
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -223,10 +239,10 @@ pub fn ollama_present() -> bool {
 pub async fn pull_ollama_model(app: AppHandle, state: State<'_, AppState>, name: String) -> AppResult<()> {
     let name = name.trim().to_string();
     if !valid_model_name(&name) {
-        return Err(AppError::message("모델 이름이 올바르지 않습니다."));
+        return Err(AppError::message("The model name is not valid."));
     }
     if PULLING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return Err(AppError::message("이미 다른 설치가 진행 중입니다."));
+        return Err(AppError::message("Another install is already running."));
     }
     let result: AppResult<()> = async {
         let settings = state.db.load_settings()?;
@@ -234,7 +250,7 @@ pub async fn pull_ollama_model(app: AppHandle, state: State<'_, AppState>, name:
             &app,
             OllamaProgress {
                 kind: "model".into(),
-                status: format!("{name} 받는 중"),
+                status: format!("Downloading {name}"),
                 completed: 0,
                 total: 0,
                 done: false,
@@ -261,7 +277,7 @@ pub async fn pull_ollama_model(app: AppHandle, state: State<'_, AppState>, name:
             &app,
             OllamaProgress {
                 kind: "model".into(),
-                status: format!("{name} 설치를 마쳤습니다."),
+                status: format!("Finished installing {name}."),
                 completed: 1,
                 total: 1,
                 done: true,
@@ -301,7 +317,7 @@ pub struct BootstrapStatus {
 #[tauri::command]
 pub async fn bootstrap_runtime(app: AppHandle, state: State<'_, AppState>) -> AppResult<BootstrapStatus> {
     if PULLING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return Err(AppError::message("이미 다른 설치가 진행 중입니다."));
+        return Err(AppError::message("Another install is already running."));
     }
     let result = bootstrap_inner(&app, &state).await;
     PULLING.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -330,7 +346,7 @@ async fn bootstrap_inner(app: &AppHandle, state: &AppState) -> AppResult<Bootstr
                 app,
                 OllamaProgress {
                     kind: "app".into(),
-                    status: "Ollama 서버를 켜는 중".into(),
+                    status: "Starting the Ollama server".into(),
                     completed: 0,
                     total: 0,
                     done: false,
@@ -350,7 +366,7 @@ async fn bootstrap_inner(app: &AppHandle, state: &AppState) -> AppResult<Bootstr
         models = state.ollama.models(&url).await.unwrap_or_default();
     }
     if models.is_empty() {
-        return Err(AppError::message("기본 모델 qwen2.5-coder:7b를 받지 못했습니다."));
+        return Err(AppError::message("Could not download the default model qwen2.5-coder:7b."));
     }
     let mut settings = state.db.load_settings()?;
     let installed = models.iter().any(|name| name == &settings.model);
@@ -366,7 +382,7 @@ async fn bootstrap_inner(app: &AppHandle, state: &AppState) -> AppResult<Bootstr
         app,
         OllamaProgress {
             kind: "app".into(),
-            status: "준비되었습니다.".into(),
+            status: "Ready.".into(),
             completed: 1,
             total: 1,
             done: true,
@@ -386,7 +402,7 @@ async fn pull_named(app: &AppHandle, state: &AppState, name: &str) -> AppResult<
         app,
         OllamaProgress {
             kind: "model".into(),
-            status: format!("{name} 받는 중"),
+            status: format!("Downloading {name}"),
             completed: 0,
             total: 0,
             done: false,
@@ -413,7 +429,7 @@ async fn pull_named(app: &AppHandle, state: &AppState, name: &str) -> AppResult<
         app,
         OllamaProgress {
             kind: "model".into(),
-            status: format!("{name} 설치를 마쳤습니다."),
+            status: format!("Finished installing {name}."),
             completed: 1,
             total: 1,
             done: true,
@@ -431,7 +447,7 @@ async fn wait_until_online(state: &AppState, seconds: u64) -> AppResult<()> {
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
-    Err(AppError::message("Ollama 서버가 켜지지 않았습니다. 잠시 후 다시 시도해주세요."))
+    Err(AppError::message("The Ollama server did not start. Try again in a moment."))
 }
 
 #[tauri::command]
@@ -444,7 +460,7 @@ pub async fn ensure_ollama_server(state: State<'_, AppState>) -> AppResult<()> {
         return Ok(());
     }
     if !ollama_is_installed() {
-        return Err(AppError::message("Ollama가 설치되어 있지 않습니다. 앱을 다시 열면 설치를 이어갑니다."));
+        return Err(AppError::message("Ollama is not installed. Reopen the app to continue setup."));
     }
     launch_ollama(&state)?;
     wait_until_online(&state, 25).await
@@ -453,7 +469,7 @@ pub async fn ensure_ollama_server(state: State<'_, AppState>) -> AppResult<()> {
 #[tauri::command]
 pub async fn install_ollama(app: AppHandle, state: State<'_, AppState>) -> AppResult<String> {
     if PULLING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return Err(AppError::message("이미 다른 설치가 진행 중입니다."));
+        return Err(AppError::message("Another install is already running."));
     }
     let result = install_ollama_inner(&app, &state).await;
     PULLING.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -516,7 +532,7 @@ fn launch_ollama(state: &AppState) -> AppResult<()> {
         state.host.store_child(child);
         return Ok(());
     }
-    Err(AppError::message("Ollama를 실행하지 못했습니다."))
+    Err(AppError::message("Could not start Ollama."))
 }
 
 async fn install_ollama_inner(app: &AppHandle, state: &AppState) -> AppResult<String> {
@@ -525,7 +541,7 @@ async fn install_ollama_inner(app: &AppHandle, state: &AppState) -> AppResult<St
             app,
             OllamaProgress {
                 kind: "app".into(),
-                status: "Ollama를 실행하는 중".into(),
+                status: "Starting Ollama".into(),
                 completed: 0,
                 total: 0,
                 done: false,
@@ -537,20 +553,20 @@ async fn install_ollama_inner(app: &AppHandle, state: &AppState) -> AppResult<St
             app,
             OllamaProgress {
                 kind: "app".into(),
-                status: "Ollama를 실행했습니다.".into(),
+                status: "Ollama is running.".into(),
                 completed: 1,
                 total: 1,
                 done: true,
                 error: None,
             },
         );
-        return Ok("Ollama를 실행했습니다. 서버가 켜지면 모델을 설치할 수 있습니다.".into());
+        return Ok("Ollama is running. You can install a model once the server is up.".into());
     }
     emit_progress(
         app,
         OllamaProgress {
             kind: "app".into(),
-            status: "Ollama 설치 파일을 받는 중".into(),
+            status: "Downloading the Ollama installer".into(),
             completed: 0,
             total: 0,
             done: false,
@@ -565,9 +581,9 @@ async fn install_ollama_inner(app: &AppHandle, state: &AppState) -> AppResult<St
         .get("https://ollama.com/download/Ollama-darwin.zip")
         .send()
         .await
-        .map_err(|error| AppError::message(format!("Ollama를 내려받지 못했습니다: {error}")))?;
+        .map_err(|error| AppError::message(format!("Could not download Ollama: {error}")))?;
     if !response.status().is_success() {
-        return Err(AppError::message("Ollama 설치 파일을 받지 못했습니다."));
+        return Err(AppError::message("Could not download the Ollama installer."));
     }
     let total = response.content_length().unwrap_or(0);
     let mut stream = response.bytes_stream();
@@ -582,7 +598,7 @@ async fn install_ollama_inner(app: &AppHandle, state: &AppState) -> AppResult<St
             app,
             OllamaProgress {
                 kind: "app".into(),
-                status: "Ollama 설치 파일을 받는 중".into(),
+                status: "Downloading the Ollama installer".into(),
                 completed,
                 total,
                 done: false,
@@ -601,11 +617,11 @@ async fn install_ollama_inner(app: &AppHandle, state: &AppState) -> AppResult<St
         .status()
         .map_err(|error| AppError::message(error.to_string()))?;
     if !unpacked.success() {
-        return Err(AppError::message("Ollama 설치 파일의 압축을 풀지 못했습니다."));
+        return Err(AppError::message("Could not unpack the Ollama installer."));
     }
     let bundled = extract.join("Ollama.app");
     if !bundled.exists() {
-        return Err(AppError::message("설치 파일 안에서 Ollama.app을 찾지 못했습니다."));
+        return Err(AppError::message("Could not find Ollama.app inside the installer."));
     }
     let destination = install_destination()?;
     if destination.exists() {
@@ -621,14 +637,14 @@ async fn install_ollama_inner(app: &AppHandle, state: &AppState) -> AppResult<St
         app,
         OllamaProgress {
             kind: "app".into(),
-            status: "Ollama 설치를 마쳤습니다.".into(),
+            status: "Finished installing Ollama.".into(),
             completed: 1,
             total: 1,
             done: true,
             error: None,
         },
     );
-    Ok("Ollama를 설치하고 실행했습니다.".into())
+    Ok("Installed and started Ollama.".into())
 }
 
 fn install_destination() -> AppResult<std::path::PathBuf> {
@@ -639,7 +655,7 @@ fn install_destination() -> AppResult<std::path::PathBuf> {
     {
         return Ok(system);
     }
-    let home = std::env::var_os("HOME").ok_or_else(|| AppError::message("홈 폴더를 찾지 못했습니다."))?;
+    let home = std::env::var_os("HOME").ok_or_else(|| AppError::message("Could not find the home folder."))?;
     let apps = std::path::PathBuf::from(home).join("Applications");
     std::fs::create_dir_all(&apps).map_err(|error| AppError::message(error.to_string()))?;
     Ok(apps.join("Ollama.app"))
@@ -655,7 +671,7 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> AppResult<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(AppError::message("Ollama.app을 복사하지 못했습니다."))
+        Err(AppError::message("Could not copy Ollama.app."))
     }
 }
 
@@ -694,16 +710,24 @@ pub fn respond_permission(state: State<'_, AppState>, answer: PermissionAnswer) 
     if state.supervisor.respond(&answer.request_id, Decision::parse(&answer.decision)) {
         Ok(())
     } else {
-        Err(AppError::message("승인 요청이 이미 종료되었습니다."))
+        Err(AppError::message("This approval request is already closed."))
     }
 }
 
 #[tauri::command]
-pub fn undo_task(state: State<'_, AppState>, task_id: String) -> AppResult<Vec<String>> {
+pub fn undo_task(state: State<'_, AppState>, task_id: String) -> AppResult<UndoReport> {
     if state.supervisor.current_task().as_deref() == Some(task_id.as_str()) {
-        return Err(AppError::message("실행 중인 작업은 되돌릴 수 없습니다. 먼저 중지해주세요."));
+        return Err(AppError::message("A running task cannot be undone. Stop it first."));
     }
-    state.db.undo_task(&task_id)
+    let (restored, skipped) = state.db.undo_task(&task_id)?;
+    Ok(UndoReport { restored, skipped })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoReport {
+    pub restored: Vec<String>,
+    pub skipped: Vec<String>,
 }
 
 #[tauri::command]
@@ -724,20 +748,43 @@ pub fn cancel_task(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> 
 }
 
 #[tauri::command]
+pub fn computer_home() -> AppResult<String> {
+    dirs::home_dir()
+        .map(|path| path.to_string_lossy().to_string())
+        .ok_or_else(|| AppError::message("Could not find the home folder."))
+}
+
+#[tauri::command]
+pub fn set_runs_in_background(state: State<'_, AppState>, enabled: bool) {
+    state.keep_alive.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[tauri::command]
+pub fn computer_desktop() -> AppResult<String> {
+    let home = dirs::home_dir().ok_or_else(|| AppError::message("Could not find the home folder."))?;
+    let desktop = home.join("Desktop");
+    if !desktop.is_dir() {
+        std::fs::create_dir_all(&desktop)
+            .map_err(|error| AppError::message(format!("Could not create the Desktop folder: {error}")))?;
+    }
+    Ok(desktop.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 pub fn start_task(app: AppHandle, state: State<'_, AppState>, request: StartRequest) -> AppResult<StartResponse> {
     let goal = request.goal.trim().to_string();
     if goal.is_empty() {
-        return Err(AppError::message("요청 내용을 입력해주세요."));
+        return Err(AppError::message("Enter a request."));
     }
     let workspace = request.workspace_path.trim().to_string();
     if !std::path::Path::new(&workspace).is_dir() {
-        return Err(AppError::message("작업 공간을 먼저 선택해주세요."));
+        return Err(AppError::message("Choose a workspace first."));
     }
     let mode = Mode::parse(&request.mode);
     let mut settings = state.db.load_settings()?;
     apply_run_overrides(&mut settings, &request);
     if settings.model.trim().is_empty() {
-        return Err(AppError::message("모델을 먼저 선택해주세요."));
+        return Err(AppError::message("Choose a model first."));
     }
     let workspace_record = state.db.remember_workspace(&workspace)?;
     let conversation_id = if let Some(id) = request.conversation_id.as_deref() {
@@ -750,10 +797,12 @@ pub fn start_task(app: AppHandle, state: State<'_, AppState>, request: StartRequ
     } else {
         state.db.create_conversation(Some(&workspace_record.id), &goal, mode.as_str())?
     };
-    let _ = state.db.insert_message(&conversation_id, "user", &goal);
+    if request.record_user {
+        let _ = state.db.insert_message(&conversation_id, "user", &goal);
+    }
     let task_id = state.db.create_task(&conversation_id, &goal)?;
     let Some(cancel) = state.supervisor.try_start(task_id.clone()) else {
-        return Err(AppError::message("이미 실행 중인 작업이 있습니다. 중지한 뒤 다시 시도해주세요."));
+        return Err(AppError::message("A task is already running. Stop it and try again."));
     };
     let launch = TaskLaunch {
         app: app.clone(),
@@ -768,7 +817,7 @@ pub fn start_task(app: AppHandle, state: State<'_, AppState>, request: StartRequ
         goal,
         settings,
         mode,
-        instructions: request.instructions.chars().take(8_000).collect(),
+        instructions: request.instructions.chars().take(24_000).collect(),
     };
     let supervisor = Arc::clone(&state.supervisor);
     let finishing_task = task_id.clone();

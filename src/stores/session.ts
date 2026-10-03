@@ -1,5 +1,8 @@
 import { create } from "zustand";
 
+import type { RunMode } from "../lib/catalog";
+import { translate, wasDenied } from "../lib/i18n";
+import { useUi } from "./ui";
 import type {
   AgentEvent,
   AgentState,
@@ -13,6 +16,14 @@ import type {
   TranscriptItem,
   WorkspaceRecord,
 } from "../types";
+
+export interface Proposal {
+  phase: "drafting" | "ready";
+  mode: Exclude<RunMode, "ask">;
+  goal: string;
+  text: string;
+  editing: boolean;
+}
 
 interface SessionStore {
   view: "chat" | "settings" | "skills" | "automations" | "plugins" | "archive";
@@ -35,7 +46,17 @@ interface SessionStore {
   ollamaMessage: string;
   models: string[];
   banner: string | null;
+  computerHome: string | null;
+  desktopPath: string | null;
+  attachments: string[];
+  proposal: Proposal | null;
+  automationWatch: { id: string; background: boolean } | null;
   setView: (view: "chat" | "settings" | "skills" | "automations" | "plugins" | "archive") => void;
+  setComputerHome: (path: string) => void;
+  setDesktopPath: (path: string) => void;
+  setAttachments: (paths: string[]) => void;
+  setProposal: (proposal: Proposal | null) => void;
+  setAutomationWatch: (watch: { id: string; background: boolean } | null) => void;
   setWorkspace: (path: string | null) => void;
   setWorkspaces: (workspaces: WorkspaceRecord[]) => void;
   setConversations: (conversations: ConversationSummary[]) => void;
@@ -50,7 +71,7 @@ interface SessionStore {
     taskId: string | null;
     workspacePath: string | null;
   }) => void;
-  newTask: () => void;
+  newTask: (workspacePath?: string | null) => void;
   pushUser: (content: string) => void;
   beginRun: (conversationId: string, taskId: string) => void;
   applyEvent: (event: AgentEvent) => void;
@@ -64,7 +85,7 @@ function transcriptToEntries(items: TranscriptItem[]): ChatEntry[] {
     .sort((a, b) => a.createdAt - b.createdAt)
     .map((item) => {
       if (item.kind === "tool") {
-        const denied = item.content.includes("거부");
+        const denied = wasDenied(item.content);
         const status: ToolStatus = denied ? "denied" : item.success ? "ok" : item.status === "running" ? "running" : "error";
         return {
           id: item.id,
@@ -101,10 +122,20 @@ export const useSession = create<SessionStore>((set, get) => ({
   inspectorOpen: true,
   inspectorTab: "files",
   ollamaOnline: false,
-  ollamaMessage: "Ollama 상태를 확인하는 중입니다.",
+  ollamaMessage: "Checking Ollama.",
   models: [],
   banner: null,
+  computerHome: null,
+  desktopPath: null,
+  attachments: [],
+  proposal: null,
+  automationWatch: null,
   setView: (view) => set({ view }),
+  setComputerHome: (computerHome) => set({ computerHome }),
+  setDesktopPath: (desktopPath) => set({ desktopPath }),
+  setAttachments: (attachments) => set({ attachments }),
+  setProposal: (proposal) => set({ proposal }),
+  setAutomationWatch: (automationWatch) => set({ automationWatch }),
   setWorkspace: (workspacePath) => set({ workspacePath }),
   setWorkspaces: (workspaces) => set({ workspaces }),
   setConversations: (conversations) => set({ conversations }),
@@ -123,8 +154,10 @@ export const useSession = create<SessionStore>((set, get) => ({
       selectedDiff: detail.fileChanges[0]?.path ?? null,
       agentState: "idle",
       banner: null,
+      proposal: null,
+      attachments: [],
     }),
-  newTask: () =>
+  newTask: (nextWorkspace) =>
     set({
       view: "chat",
       conversationId: null,
@@ -136,6 +169,9 @@ export const useSession = create<SessionStore>((set, get) => ({
       agentState: "idle",
       banner: null,
       permission: null,
+      proposal: null,
+      attachments: [],
+      workspacePath: nextWorkspace === undefined ? get().desktopPath : nextWorkspace,
     }),
   pushUser: (content) =>
     set((state) => ({
@@ -156,7 +192,44 @@ export const useSession = create<SessionStore>((set, get) => ({
   selectDiff: (selectedDiff) => set({ selectedDiff, inspectorTab: "files", inspectorOpen: true }),
   applyEvent: (event) => {
     const state = get();
+    const watch = state.automationWatch;
+    if (watch && event.kind === "state" && (event.state === "completed" || event.state === "failed" || event.state === "cancelled")) {
+      useUi.getState().finishAutomation(watch.id, event.state === "completed");
+      if (watch.background) {
+        if (event.state === "completed") useUi.getState().setNotice(translate(useUi.getState().language, "Automation finished."));
+        set({ automationWatch: null, agentState: "idle", statusDetail: null, permission: null });
+        return;
+      }
+      set({ automationWatch: null });
+    }
+    if (get().automationWatch?.background) return;
     if (event.kind === "state") {
+      const proposal = state.proposal;
+      if (proposal?.phase === "drafting" && (event.state === "completed" || event.state === "failed" || event.state === "cancelled")) {
+        if (event.state === "completed") {
+          const last = [...state.messages].reverse().find((entry) => entry.kind === "assistant");
+          const text = last?.kind === "assistant" ? last.content.trim() : "";
+          set({
+            agentState: event.state,
+            statusDetail: event.detail ?? null,
+            permission: null,
+            proposal: {
+              ...proposal,
+              phase: "ready",
+              text: text || translate(useUi.getState().language, "{goal}\nStay inside this scope. Do not delete anything without approval.", { goal: proposal.goal }),
+              editing: false,
+            },
+          });
+          return;
+        }
+        set({
+          agentState: event.state,
+          statusDetail: event.detail ?? null,
+          permission: null,
+          proposal: null,
+        });
+        return;
+      }
       set({
         agentState: event.state,
         statusDetail: event.detail ?? null,
@@ -184,7 +257,11 @@ export const useSession = create<SessionStore>((set, get) => ({
       } else if (event.content.trim()) {
         messages.push({ id: crypto.randomUUID(), kind: "assistant", content: event.content });
       }
-      set({ messages });
+      const drafted = state.proposal?.phase === "drafting" && event.content.trim() ? event.content.trim() : null;
+      set({
+        messages,
+        proposal: drafted && state.proposal ? { ...state.proposal, text: drafted } : state.proposal,
+      });
       return;
     }
     if (event.kind === "tool_started") {
@@ -205,7 +282,7 @@ export const useSession = create<SessionStore>((set, get) => ({
       return;
     }
     if (event.kind === "tool_finished") {
-      const status: ToolStatus = event.content.includes("거부") ? "denied" : event.success ? "ok" : "error";
+      const status: ToolStatus = wasDenied(event.content) ? "denied" : event.success ? "ok" : "error";
       set({
         messages: state.messages.map((entry) =>
           entry.kind === "tool" && entry.id === event.id ? { ...entry, status, output: event.content } : entry,

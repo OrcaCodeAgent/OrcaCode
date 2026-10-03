@@ -4,7 +4,7 @@ use crate::domain::{PlanStep, ToolOutput};
 
 pub fn update_plan(args: &Value) -> ToolOutput {
     let Some(items) = args.get("steps").and_then(Value::as_array) else {
-        return ToolOutput::fail("steps 배열이 필요합니다.");
+        return ToolOutput::fail("A steps array is required.");
     };
     let steps: Vec<PlanStep> = items
         .iter()
@@ -30,7 +30,7 @@ pub fn update_plan(args: &Value) -> ToolOutput {
         })
         .collect();
     if steps.is_empty() {
-        return ToolOutput::fail("계획 단계가 비어 있습니다.");
+        return ToolOutput::fail("The plan has no steps.");
     }
     let summary = steps
         .iter()

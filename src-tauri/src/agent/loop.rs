@@ -88,7 +88,7 @@ pub async fn run_task(task: TaskLaunch) {
         instructions,
     } = task;
     if settings.model.trim().is_empty() {
-        fail_task(&app, &db, &conversation_id, &task_id, &[], "모델을 먼저 선택해주세요.");
+        fail_task(&app, &db, &conversation_id, &task_id, &[], "Choose a model first.");
         return;
     }
     let registry = ToolRegistry::new();
@@ -98,11 +98,7 @@ pub async fn run_task(task: TaskLaunch) {
     } else {
         settings.system_prompt.clone()
     };
-    if mode == Mode::Plan {
-        prompt.push_str(
-            "\n\nPlan mode is on. Use read-only tools and update_plan. Do not edit files, start processes, or commit. Finish with a concrete plan.",
-        );
-    }
+    prompt.push_str(mode_brief(mode));
     let extra = instructions.trim();
     if !extra.is_empty() {
         prompt.push_str("\n\n");
@@ -115,7 +111,7 @@ pub async fn run_task(task: TaskLaunch) {
         move || build_briefing(&workspace, &goal, mode, &cancel)
     })
     .await
-    .unwrap_or_else(|_| "작업 공간 요약을 만들지 못했습니다.".into());
+    .unwrap_or_else(|_| "Could not build the workspace summary.".into());
 
     let mut messages = vec![
         ChatMessage::system(prompt),
@@ -128,7 +124,11 @@ pub async fn run_task(task: TaskLaunch) {
     let mut verify_failures = 0;
     let mut native_tools = true;
     let vision = model_supports_vision(&settings.model);
-    let max_iterations = settings.max_iterations;
+    let max_iterations = match mode {
+        Mode::Plan => settings.max_iterations.min(6),
+        Mode::Do => settings.max_iterations.min(12),
+        _ => settings.max_iterations,
+    };
 
     for iteration in 1..=max_iterations {
         if cancel.is_cancelled() {
@@ -142,7 +142,7 @@ pub async fn run_task(task: TaskLaunch) {
                 detail: Some(format!("{iteration}/{max_iterations}")),
             },
         );
-        let fitted = fit_messages(&messages, (settings.context_length as usize).saturating_mul(2).max(2000));
+        let fitted = fit_messages(&messages, (settings.context_length as usize).max(2000));
         let mut gate = StreamGate {
             buffer: String::new(),
             emitted: false,
@@ -201,7 +201,7 @@ pub async fn run_task(task: TaskLaunch) {
                         &conversation_id,
                         &task_id,
                         &plan,
-                        "모델 응답을 도구 호출로 해석하지 못했습니다.",
+                        "Could not read the model response as a tool call.",
                     );
                     return;
                 }
@@ -241,7 +241,7 @@ pub async fn run_task(task: TaskLaunch) {
 
         match turn.action {
             TurnAction::Final(content) => {
-                if mode == Mode::Agent && mutated && verify_failures < 2 {
+                if verifies(mode) && mutated && verify_failures < 2 {
                     emit(
                         &app,
                         AgentEvent::State {
@@ -256,7 +256,7 @@ pub async fn run_task(task: TaskLaunch) {
                         run_checks(&workspace_for_check, timeout, &cancel_for_check)
                     })
                     .await
-                    .unwrap_or((false, "검증 작업을 시작하지 못했습니다.".into()));
+                    .unwrap_or((false, "Could not start verification.".into()));
                     let report = crate::safety::truncate::truncate_observation(&report, 12_000);
                     emit(
                         &app,
@@ -277,14 +277,14 @@ pub async fn run_task(task: TaskLaunch) {
                     )));
                     continue;
                 }
-                if mode == Mode::Agent && mutated && verify_failures >= 2 {
+                if verifies(mode) && mutated && verify_failures >= 2 {
                     fail_task(
                         &app,
                         &db,
                         &conversation_id,
                         &task_id,
                         &plan,
-                        "자동 검증이 계속 실패했습니다. 마지막 오류를 확인하고 다시 시도해주세요.",
+                        "Automatic verification kept failing. Check the last error and try again.",
                     );
                     return;
                 }
@@ -327,7 +327,7 @@ pub async fn run_task(task: TaskLaunch) {
                                 &conversation_id,
                                 &task_id,
                                 &plan,
-                                "같은 도구 호출이 같은 결과로 반복되어 작업을 중단했습니다.",
+                                "Stopped because the same tool call kept returning the same result.",
                             );
                             return;
                         }
@@ -342,7 +342,7 @@ pub async fn run_task(task: TaskLaunch) {
         &conversation_id,
         &task_id,
         &plan,
-        "최대 반복 횟수에 도달했습니다. 작업을 더 작은 단위로 나눠 다시 요청해주세요.",
+        "Reached the maximum number of steps. Split the job into smaller requests.",
     );
 }
 
@@ -372,11 +372,15 @@ async fn execute_one(
     mutated: &mut bool,
 ) -> ToolFlow {
     let Some(def) = registry.get(name).cloned() else {
-        let message = format!("존재하지 않는 도구입니다: {name}");
+        let message = format!("Unknown tool: {name}");
         return ToolFlow::Continue(tool_message(name, &message, false));
     };
     if !registry.allowed(name, mode) {
-        let message = "질문 모드에서는 파일을 수정하거나 명령을 실행할 수 없습니다.".to_string();
+        let message = if mode == Mode::Plan {
+            "Do not change files before approval. Describe the plan only.".to_string()
+        } else {
+            "Ask mode does not change files or run commands.".to_string()
+        };
         return ToolFlow::Continue(tool_message(name, &message, false));
     }
     let report = assess_tool(name, &arguments, workspace, def.inherent_risk);
@@ -411,7 +415,7 @@ async fn execute_one(
             decision.as_str(),
         );
         if cancel.is_cancelled() || decision == Decision::Deny {
-            return ToolFlow::Continue(tool_message(name, "사용자가 이 작업을 거부했습니다.", false));
+            return ToolFlow::Continue(tool_message(name, "The user denied this action.", false));
         }
         if decision == Decision::AllowSession {
             supervisor.approvals.allow(report.fingerprint);
@@ -456,7 +460,7 @@ async fn execute_one(
     let tool_args = arguments.clone();
     let output = tokio::task::spawn_blocking(move || registry.execute(&tool_name, tool_args, &ctx))
         .await
-        .unwrap_or_else(|_| ToolOutput::fail("도구 실행이 중단되었습니다."));
+        .unwrap_or_else(|_| ToolOutput::fail("The tool run was interrupted."));
     if output.mutated {
         *mutated = true;
     }
@@ -485,11 +489,11 @@ async fn execute_one(
     let mut note = String::new();
     let stop = match signal {
         LoopSignal::RepeatWarning => {
-            note = "동일 작업이 반복되고 있다. 다른 접근법을 사용하라.".into();
+            note = "The same action is repeating. Try a different approach.".into();
             false
         }
         LoopSignal::Stop => {
-            note = "같은 도구 호출이 같은 결과로 반복되어 작업을 중단했습니다.".into();
+            note = "Stopped because the same tool call kept returning the same result.".into();
             true
         }
         LoopSignal::Ok => false,
@@ -525,6 +529,19 @@ fn tool_message(name: &str, content: &str, success: bool) -> ChatMessage {
     }
 }
 
+fn mode_brief(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Plan => "\n\nPreview only. Look with read-only tools, then stop. Finish with one short paragraph in the user's language: what you will do, what you will not delete, and the order. Do not edit, move, delete, install, or commit.",
+        Mode::Ask => "\n\nAsk mode. Explain only. Do not change files, run mutating commands, or commit.",
+        Mode::Do => "\n\nDo mode. The user already approved the plan. Finish that one job and stop. Do not widen the task. Call update_plan with the steps you are taking.",
+        Mode::Mission | Mode::Agent => "\n\nMission mode. The user already approved the plan. Carry every step through. Call update_plan first, then verify the result before you finish.",
+    }
+}
+
+fn verifies(mode: Mode) -> bool {
+    matches!(mode, Mode::Mission | Mode::Agent)
+}
+
 fn model_supports_vision(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
     ["llava", "vision", "-vl", "moondream", "minicpm-v", "bakllava", "qwen2.5vl", "gemma3"]
@@ -557,7 +574,7 @@ fn fail_task(app: &AppHandle, db: &Database, conversation_id: &str, task_id: &st
 }
 
 fn finish_cancelled(app: &AppHandle, db: &Database, conversation_id: &str, task_id: &str, plan: &[PlanStep]) {
-    let _ = db.insert_message(conversation_id, "assistant", "작업이 취소되었습니다.");
+    let _ = db.insert_message(conversation_id, "assistant", "The task was cancelled.");
     let _ = db.update_task(task_id, "cancelled", plan);
     emit(
         app,

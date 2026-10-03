@@ -399,10 +399,10 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
 
-        let done = parse_model_turn(r#"{"type":"final","content":"작업 완료"}"#, &[]);
+        let done = parse_model_turn(r#"{"type":"final","content":"done"}"#, &[]);
         match done {
             ParseOutcome::Turn(turn) => {
-                assert_eq!(turn.action, TurnAction::Final("작업 완료".into()));
+                assert_eq!(turn.action, TurnAction::Final("done".into()));
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn prose_is_final() {
-        let parsed = parse_model_turn("프로젝트에는 빌드 스크립트가 있습니다.", &[]);
+        let parsed = parse_model_turn("The project has a build script.", &[]);
         match parsed {
             ParseOutcome::Turn(turn) => {
                 assert!(matches!(turn.action, TurnAction::Final(_)));

@@ -55,12 +55,12 @@ pub fn detect_checks(workspace: &Path) -> Vec<Check> {
 pub fn run_checks(workspace: &Path, timeout: Duration, cancel: &CancelFlag) -> (bool, String) {
     let checks = detect_checks(workspace);
     if checks.is_empty() {
-        return (true, "실행할 빌드/테스트 명령을 찾지 못했습니다. 별도 검증은 생략합니다.".into());
+        return (true, "No build or test command was found. Skipping a separate verification.".into());
     }
     let mut report = String::new();
     for check in checks {
         if cancel.is_cancelled() {
-            return (false, "검증이 취소되었습니다.".into());
+            return (false, "Verification was cancelled.".into());
         }
         report.push_str(&format!("# {}\n$ {}\n", check.label, check.command));
         let output = run_command(&check.command, workspace, timeout, cancel);

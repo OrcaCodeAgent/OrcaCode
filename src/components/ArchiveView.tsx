@@ -1,4 +1,5 @@
 import { api, explain } from "../lib/api";
+import { localizeTitle, useT } from "../lib/i18n";
 import { isRunning, useSession } from "../stores/session";
 import { useUi } from "../stores/ui";
 
@@ -12,14 +13,16 @@ export function ArchiveView() {
   const agentState = useSession((state) => state.agentState);
   const items = conversations.filter((conversation) => archived.includes(conversation.id));
   const running = isRunning(agentState);
+  const t = useT();
+  const language = useUi((state) => state.language);
 
   return (
     <div className="scroll-thin flex-1 overflow-auto px-8 py-6">
       <div className="mx-auto max-w-xl">
-        <h1 className="text-xl font-medium">보관함</h1>
-        <p className="mt-2 text-sm text-muted">보관해 둔 채팅입니다. 열면 다시 최근 목록으로 돌아갑니다.</p>
+        <h1 className="text-xl font-medium">{t("Archive")}</h1>
+        <p className="mt-2 text-sm text-muted">{t("Archived chats. Opening one brings it back to the recent list.")}</p>
         <div className="mt-5 space-y-1">
-          {items.length === 0 ? <p className="text-sm text-muted">보관된 채팅이 없습니다.</p> : null}
+          {items.length === 0 ? <p className="text-sm text-muted">{t("No archived chats.")}</p> : null}
           {items.map((conversation) => (
             <div key={conversation.id} className="flex items-center gap-2 rounded-lg px-2 py-2 hover:bg-elev">
               <button
@@ -37,10 +40,10 @@ export function ArchiveView() {
                     .catch((error) => setBanner(explain(error)));
                 }}
               >
-                {conversation.title}
+                {localizeTitle(language, conversation.title)}
               </button>
               <button className="text-xs text-muted" onClick={() => toggleArchive(conversation.id)}>
-                복원
+                {t("Restore")}
               </button>
             </div>
           ))}

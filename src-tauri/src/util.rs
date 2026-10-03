@@ -46,14 +46,14 @@ pub fn stable_hash(text: &str) -> u64 {
 }
 
 pub fn title_from_goal(goal: &str) -> String {
-    let line = goal.lines().find(|line| !line.trim().is_empty()).unwrap_or("새 작업");
+    let line = goal.lines().find(|line| !line.trim().is_empty()).unwrap_or("New chat");
     let trimmed = line.trim();
     let mut chars = trimmed.chars();
     let short: String = chars.by_ref().take(42).collect();
     if chars.next().is_some() {
         format!("{short}…")
     } else if short.is_empty() {
-        "새 작업".into()
+        "New chat".into()
     } else {
         short
     }

@@ -11,35 +11,35 @@ use crate::util::new_id;
 
 pub fn open_application(args: &Value) -> ToolOutput {
     let Some(name) = args.get("name").and_then(Value::as_str) else {
-        return ToolOutput::fail("name이 필요합니다.");
+        return ToolOutput::fail("name is required.");
     };
     if name.trim().is_empty() || name.contains('\0') {
-        return ToolOutput::fail("애플리케이션 이름이 올바르지 않습니다.");
+        return ToolOutput::fail("The application name is not valid.");
     }
     match Command::new("open").arg("-a").arg(name).status() {
-        Ok(status) if status.success() => ToolOutput::ok(format!("{name}을 열었습니다.")),
-        Ok(_) => ToolOutput::fail("애플리케이션을 열지 못했습니다."),
-        Err(error) => ToolOutput::fail(format!("애플리케이션을 열지 못했습니다: {error}")),
+        Ok(status) if status.success() => ToolOutput::ok(format!("Opened {name}.")),
+        Ok(_) => ToolOutput::fail("Could not open the application."),
+        Err(error) => ToolOutput::fail(format!("Could not open the application: {error}")),
     }
 }
 
 pub fn open_url(args: &Value) -> ToolOutput {
     let Some(url) = args.get("url").and_then(Value::as_str) else {
-        return ToolOutput::fail("url이 필요합니다.");
+        return ToolOutput::fail("url is required.");
     };
     if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return ToolOutput::fail("http 또는 https 주소만 열 수 있습니다.");
+        return ToolOutput::fail("Only http or https addresses can be opened.");
     }
     match Command::new("open").arg(url).status() {
-        Ok(status) if status.success() => ToolOutput::ok(format!("열었습니다: {url}")),
-        _ => ToolOutput::fail("주소를 열지 못했습니다."),
+        Ok(status) if status.success() => ToolOutput::ok(format!("Opened: {url}")),
+        _ => ToolOutput::fail("Could not open the address."),
     }
 }
 
 pub fn screenshot(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let directory = ctx.workspace.join(".orca").join("screenshots");
     if let Err(error) = fs::create_dir_all(&directory) {
-        return ToolOutput::fail(format!("스크린샷 폴더를 만들지 못했습니다: {error}"));
+        return ToolOutput::fail(format!("Could not create the screenshot folder: {error}"));
     }
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -53,14 +53,14 @@ pub fn screenshot(args: &Value, ctx: &ToolCtx) -> ToolOutput {
         .arg(&path)
         .status();
     if !matches!(status, Ok(status) if status.success()) {
-        return ToolOutput::fail("스크린샷을 찍지 못했습니다.");
+        return ToolOutput::fail("Could not take a screenshot.");
     }
     let _ = Command::new("sips").arg("-Z").arg("1280").arg(&path).status();
     let display = path.display().to_string();
     let mut output = ToolOutput::ok(if ctx.vision {
         format!("screenshot: {display}")
     } else {
-        format!("screenshot: {display}\n현재 모델은 이미지를 볼 수 없습니다. 파일 경로만 전달합니다.")
+        format!("screenshot: {display}\nThe current model cannot see images. Only the file path is passed on.")
     });
     if ctx.vision {
         if let Ok(bytes) = fs::read(&path) {
@@ -75,17 +75,17 @@ pub fn screenshot(args: &Value, ctx: &ToolCtx) -> ToolOutput {
 
 pub fn keyboard_type(args: &Value) -> ToolOutput {
     let Some(text) = args.get("text").and_then(Value::as_str) else {
-        return ToolOutput::fail("text가 필요합니다.");
+        return ToolOutput::fail("text is required.");
     };
     match platform::keystroke(text) {
-        Ok(()) => ToolOutput::ok("키보드 입력을 전달했습니다."),
+        Ok(()) => ToolOutput::ok("Sent keyboard input."),
         Err(error) => ToolOutput::fail(error),
     }
 }
 
 pub fn keyboard_shortcut(args: &Value) -> ToolOutput {
     let Some(key) = args.get("key").and_then(Value::as_str) else {
-        return ToolOutput::fail("key가 필요합니다.");
+        return ToolOutput::fail("key is required.");
     };
     let modifiers: Vec<String> = args
         .get("modifiers")
@@ -98,39 +98,39 @@ pub fn keyboard_shortcut(args: &Value) -> ToolOutput {
         })
         .unwrap_or_default();
     match platform::shortcut(key, &modifiers) {
-        Ok(()) => ToolOutput::ok("단축키를 전달했습니다."),
+        Ok(()) => ToolOutput::ok("Sent the shortcut."),
         Err(error) => ToolOutput::fail(error),
     }
 }
 
 pub fn mouse_click(args: &Value) -> ToolOutput {
     let Some((x, y)) = point(args) else {
-        return ToolOutput::fail("x와 y가 필요합니다.");
+        return ToolOutput::fail("x and y are required.");
     };
     let button = args.get("button").and_then(Value::as_str).unwrap_or("left");
     match platform::mouse_click(x, y, button) {
-        Ok(()) => ToolOutput::ok(format!("클릭했습니다: {x}, {y}")),
+        Ok(()) => ToolOutput::ok(format!("Clicked: {x}, {y}")),
         Err(error) => ToolOutput::fail(error),
     }
 }
 
 pub fn mouse_move(args: &Value) -> ToolOutput {
     let Some((x, y)) = point(args) else {
-        return ToolOutput::fail("x와 y가 필요합니다.");
+        return ToolOutput::fail("x and y are required.");
     };
     match platform::mouse_move(x, y) {
-        Ok(()) => ToolOutput::ok(format!("이동했습니다: {x}, {y}")),
+        Ok(()) => ToolOutput::ok(format!("Moved: {x}, {y}")),
         Err(error) => ToolOutput::fail(error),
     }
 }
 
 pub fn scroll(args: &Value) -> ToolOutput {
     let Some((x, y)) = point(args) else {
-        return ToolOutput::fail("x와 y가 필요합니다.");
+        return ToolOutput::fail("x and y are required.");
     };
     let dy = args.get("dy").and_then(Value::as_i64).unwrap_or(-3) as i32;
     match platform::scroll(x, y, dy) {
-        Ok(()) => ToolOutput::ok(format!("스크롤했습니다: {dy}")),
+        Ok(()) => ToolOutput::ok(format!("Scrolled: {dy}")),
         Err(error) => ToolOutput::fail(error),
     }
 }

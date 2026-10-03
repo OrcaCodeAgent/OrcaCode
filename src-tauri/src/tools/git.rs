@@ -45,28 +45,28 @@ pub fn git_branch(ctx: &ToolCtx) -> ToolOutput {
 
 pub fn git_add(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(paths) = args.get("paths").and_then(Value::as_array) else {
-        return ToolOutput::fail("paths 배열이 필요합니다. git add . 는 허용하지 않습니다.");
+        return ToolOutput::fail("A paths array is required. git add . is not allowed.");
     };
     if paths.is_empty() {
-        return ToolOutput::fail("추가할 경로가 없습니다.");
+        return ToolOutput::fail("There is no path to add.");
     }
     let mut command = vec!["add".into(), "--".into()];
     for path in paths {
         let Some(raw) = path.as_str() else {
-            return ToolOutput::fail("paths 항목은 문자열이어야 합니다.");
+            return ToolOutput::fail("Each paths entry must be a string.");
         };
         if raw.trim().is_empty() || raw == "." || raw == "-A" || raw == "--all" {
-            return ToolOutput::fail("전체 추가는 허용하지 않습니다. 경로를 명시하세요.");
+            return ToolOutput::fail("Adding everything is not allowed. Name the paths.");
         }
         let resolved = match resolve_path(&ctx.workspace, raw) {
             Ok(path) => path,
-            Err(_) => return ToolOutput::fail("빈 경로는 추가할 수 없습니다."),
+            Err(_) => return ToolOutput::fail("An empty path cannot be added."),
         };
         if !resolved.inside_workspace {
-            return ToolOutput::fail("작업 공간 밖 파일은 git add 할 수 없습니다.");
+            return ToolOutput::fail("Files outside the workspace cannot be git added.");
         }
         if crate::safety::paths::is_sensitive_path(&resolved.path) {
-            return ToolOutput::fail(format!("민감한 파일은 자동으로 추가하지 않습니다: {raw}"));
+            return ToolOutput::fail(format!("Sensitive files are not added automatically: {raw}"));
         }
         command.push(raw.to_string());
     }
@@ -75,23 +75,23 @@ pub fn git_add(args: &Value, ctx: &ToolCtx) -> ToolOutput {
 
 pub fn git_commit(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(message) = args.get("message").and_then(Value::as_str) else {
-        return ToolOutput::fail("message가 필요합니다.");
+        return ToolOutput::fail("message is required.");
     };
     let message = message.trim();
     if message.is_empty() {
-        return ToolOutput::fail("커밋 메시지가 비어 있습니다.");
+        return ToolOutput::fail("The commit message is empty.");
     }
     if message.len() > 8_000 {
-        return ToolOutput::fail("커밋 메시지가 너무 깁니다.");
+        return ToolOutput::fail("The commit message is too long.");
     }
     let file = ctx.workspace.join(".orca").join("commit-message.txt");
     if let Some(parent) = file.parent() {
         if let Err(error) = std::fs::create_dir_all(parent) {
-            return ToolOutput::fail(format!("커밋 메시지 폴더를 만들지 못했습니다: {error}"));
+            return ToolOutput::fail(format!("Could not create the commit message folder: {error}"));
         }
     }
     if let Err(error) = std::fs::write(&file, message) {
-        return ToolOutput::fail(format!("커밋 메시지를 저장하지 못했습니다: {error}"));
+        return ToolOutput::fail(format!("Could not save the commit message: {error}"));
     }
     let output = git(ctx, vec!["commit".into(), "-F".into(), file.display().to_string()]);
     let _ = std::fs::remove_file(&file);
@@ -100,20 +100,20 @@ pub fn git_commit(args: &Value, ctx: &ToolCtx) -> ToolOutput {
 
 pub fn git_checkout(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(branch) = args.get("branch").and_then(Value::as_str) else {
-        return ToolOutput::fail("branch가 필요합니다.");
+        return ToolOutput::fail("branch is required.");
     };
     if !valid_branch(branch) {
-        return ToolOutput::fail("브랜치 이름이 올바르지 않습니다.");
+        return ToolOutput::fail("The branch name is not valid.");
     }
     git(ctx, vec!["checkout".into(), branch.to_string()])
 }
 
 pub fn git_create_branch(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(name) = args.get("name").and_then(Value::as_str) else {
-        return ToolOutput::fail("name이 필요합니다.");
+        return ToolOutput::fail("name is required.");
     };
     if !valid_branch(name) {
-        return ToolOutput::fail("브랜치 이름이 올바르지 않습니다.");
+        return ToolOutput::fail("The branch name is not valid.");
     }
     git(ctx, vec!["checkout".into(), "-b".into(), name.to_string()])
 }
@@ -126,7 +126,7 @@ fn git(ctx: &ToolCtx, args: Vec<String>) -> ToolOutput {
         &ctx.cancel,
     );
     if !probe.succeeded() || !probe.stdout.to_ascii_lowercase().contains("true") {
-        return ToolOutput::fail("이 폴더는 Git 저장소가 아닙니다.");
+        return ToolOutput::fail("This folder is not a Git repository.");
     }
     let output = run_git(&ctx.workspace, &args, Duration::from_secs(30), &ctx.cancel);
     let mut text = format_command_result(&format!("git {}", args.join(" ")), &ctx.workspace, &output);

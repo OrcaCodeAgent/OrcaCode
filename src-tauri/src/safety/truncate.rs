@@ -23,7 +23,7 @@ pub fn truncate_observation(input: &str, limit: usize) -> String {
         .chars()
         .rev()
         .collect();
-    format!("[출력이 길어 일부만 전달합니다. 원본 {count}자]\n--- 오류로 보이는 줄 ---\n{errors}\n--- 끝부분 ---\n{tail}")
+    format!("[Output was shortened. Original length: {count} characters]\n--- Lines that look like errors ---\n{errors}\n--- End ---\n{tail}")
 }
 
 fn is_error_line(line: &str) -> bool {
@@ -60,6 +60,6 @@ mod tests {
         let output = truncate_observation(&input, 80);
         assert!(output.contains("error: boom"));
         assert!(output.contains("TAIL"));
-        assert!(output.contains("원본"));
+        assert!(output.contains("Original"));
     }
 }

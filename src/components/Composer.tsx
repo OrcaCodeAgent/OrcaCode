@@ -3,16 +3,23 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import { api, explain } from "../lib/api";
 import {
-  PLUGINS,
+  CAPABILITIES,
   SLASH,
+  approvedPlan,
   approvalLabel,
   buildInstructions,
   effortLabel,
+  intentSuggestions,
+  isPlainChat,
+  previewEvidence,
+  previewInstructions,
   runModeLabel,
+  scopeInstructions,
   type Approval,
   type Effort,
   type RunMode,
 } from "../lib/catalog";
+import { useT } from "../lib/i18n";
 import { allSkills, useUi } from "../stores/ui";
 import { isRunning, useSession } from "../stores/session";
 import { useSettings } from "../stores/settings";
@@ -26,6 +33,11 @@ export function Composer({ centered = false }: { centered?: boolean }) {
   const lastPrompt = useRef("");
   const box = useRef<HTMLTextAreaElement>(null);
   const workspacePath = useSession((state) => state.workspacePath);
+  const desktopPath = useSession((state) => state.desktopPath);
+  const attachments = useSession((state) => state.attachments);
+  const proposal = useSession((state) => state.proposal);
+  const setAttachments = useSession((state) => state.setAttachments);
+  const setProposal = useSession((state) => state.setProposal);
   const conversationId = useSession((state) => state.conversationId);
   const agentState = useSession((state) => state.agentState);
   const models = useSession((state) => state.models);
@@ -42,6 +54,8 @@ export function Composer({ centered = false }: { centered?: boolean }) {
   const environment = useUi((state) => state.environment);
   const runMode = useUi((state) => state.runMode);
   const personality = useUi((state) => state.personality);
+  const language = useUi((state) => state.language);
+  const t = useT();
   const skills = useUi((state) => state.skills);
   const enabledPlugins = useUi((state) => state.enabledPlugins);
   const goals = useUi((state) => state.goals);
@@ -49,7 +63,8 @@ export function Composer({ centered = false }: { centered?: boolean }) {
   const setNotice = useUi((state) => state.setNotice);
   const setGoal = useUi((state) => state.setGoal);
   const moveGoal = useUi((state) => state.moveGoal);
-  const running = isRunning(agentState);
+  const automationWatch = useSession((state) => state.automationWatch);
+  const running = isRunning(agentState) || Boolean(automationWatch);
   const goalKey = conversationId ?? "draft";
   const goal = goals[goalKey] ?? "";
   const skillList = allSkills(skills);
@@ -73,6 +88,10 @@ export function Composer({ centered = false }: { centered?: boolean }) {
 
   async function ensureWorkspace() {
     if (environment === "worktree") {
+      if (isPlainChat(workspacePath, desktopPath)) {
+        setBanner(t("A worktree can only be created inside a project folder."));
+        return null;
+      }
       if (!workspacePath) return null;
       try {
         const created = await api.createWorktree(workspacePath);
@@ -80,14 +99,70 @@ export function Composer({ centered = false }: { centered?: boolean }) {
         useSession.getState().setWorkspace(remembered.path);
         useSession.getState().setWorkspaces(await api.listWorkspaces());
         patch({ environment: "local" });
-        setNotice(`Worktree에서 작업합니다. ${remembered.path}`);
+        setNotice(t("Working in a worktree. {path}", { path: remembered.path }));
         return remembered.path;
       } catch (error) {
         setBanner(explain(error));
         return null;
       }
     }
-    return workspacePath;
+    if (workspacePath) return workspacePath;
+    if (!desktopPath) return null;
+    try {
+      const remembered = await api.rememberWorkspace(desktopPath);
+      useSession.getState().setWorkspace(remembered.path);
+      useSession.getState().setWorkspaces(await api.listWorkspaces());
+      return remembered.path;
+    } catch (error) {
+      setBanner(explain(error));
+      return null;
+    }
+  }
+
+  const plainChat = isPlainChat(workspacePath, desktopPath);
+  const folderLabel = workspacePath?.replace(/^\/Users\/[^/]+/, "~").split("/").filter(Boolean).at(-1) ?? "Folder";
+
+  function instructionBlock(goalText: string) {
+    return buildInstructions({
+      text: goalText,
+      personality,
+      effort,
+      goal,
+      skills: skillList,
+      enabledPlugins,
+      language,
+      scope: scopeInstructions(plainChat, folderLabel),
+    });
+  }
+
+  async function launch(input: {
+    goalText: string;
+    mode: string;
+    folder: string;
+    instructions: string;
+    recordUser: boolean;
+    showUser: boolean;
+  }) {
+    if (input.showUser) pushUser(input.goalText);
+    try {
+      const started = await api.startTask({
+        conversationId,
+        goal: input.goalText,
+        mode: input.mode,
+        workspacePath: input.folder,
+        approval: input.mode === "ask" || input.mode === "plan" ? "default" : approval,
+        effort,
+        instructions: input.instructions,
+        recordUser: input.recordUser,
+      });
+      if (!conversationId) moveGoal("draft", started.conversationId);
+      beginRun(started.conversationId, started.taskId);
+      setConversations(await api.listConversations());
+    } catch (error) {
+      setBanner(explain(error));
+      setAgentIdle({ kind: "state", state: "failed", detail: explain(error) });
+      if (input.mode === "plan") setProposal(null);
+    }
   }
 
   async function send(override?: string, modeOverride?: RunMode) {
@@ -95,11 +170,11 @@ export function Composer({ centered = false }: { centered?: boolean }) {
     if (!goalText || running) return;
     const folder = await ensureWorkspace();
     if (!folder) {
-      setBanner("프로젝트를 먼저 선택해주세요.");
+      setBanner(environment === "worktree" ? t("Choose a folder before creating a worktree.") : t("Could not open the Desktop as the workspace."));
       return;
     }
     if (!settings.model) {
-      setBanner("모델을 먼저 선택해주세요.");
+      setBanner(t("Choose a model first."));
       return;
     }
     const mode = modeOverride ?? runMode;
@@ -108,32 +183,47 @@ export function Composer({ centered = false }: { centered?: boolean }) {
       setText("");
     }
     setMenu(null);
-    pushUser(goalText);
-    const instructions = buildInstructions({
-      text: goalText,
-      personality,
-      effort,
-      goal,
-      skills: skillList,
-      enabledPlugins,
-    });
-    try {
-      const started = await api.startTask({
-        conversationId,
-        goal: goalText,
-        mode: mode === "plan" ? "plan" : mode,
-        workspacePath: folder,
-        approval: mode === "agent" ? approval : "default",
-        effort,
-        instructions,
+    setAttachments([]);
+    setProposal(null);
+    if (mode === "ask") {
+      await launch({
+        goalText,
+        mode: "ask",
+        folder,
+        instructions: instructionBlock(goalText),
+        recordUser: true,
+        showUser: true,
       });
-      if (!conversationId) moveGoal("draft", started.conversationId);
-      beginRun(started.conversationId, started.taskId);
-      setConversations(await api.listConversations());
-    } catch (error) {
-      setBanner(explain(error));
-      setAgentIdle({ kind: "state", state: "failed", detail: explain(error) });
+      return;
     }
+    setProposal({ phase: "drafting", mode, goal: goalText, text: "", editing: false });
+    await launch({
+      goalText,
+      mode: "plan",
+      folder,
+      instructions: `${previewInstructions(mode, goalText)}\n\n${instructionBlock(goalText)}`,
+      recordUser: true,
+      showUser: true,
+    });
+  }
+
+  async function approveProposal() {
+    if (!proposal || proposal.phase !== "ready" || running) return;
+    const planText = proposal.text.trim();
+    if (!planText) return;
+    const folder = await ensureWorkspace();
+    if (!folder) return;
+    const mode = proposal.mode;
+    const goalText = proposal.goal;
+    setProposal(null);
+    await launch({
+      goalText,
+      mode,
+      folder,
+      instructions: [approvedPlan(planText), previewEvidence(messages), instructionBlock(goalText)].filter(Boolean).join("\n\n"),
+      recordUser: false,
+      showUser: false,
+    });
   }
 
   function onChange(value: string) {
@@ -173,43 +263,45 @@ export function Composer({ centered = false }: { centered?: boolean }) {
       setMenu("goal");
       return;
     }
-    if (id === "plan") {
-      patch({ runMode: runMode === "plan" ? "agent" : "plan" });
-      setNotice(runMode === "plan" ? "Plan mode를 껐습니다." : "Plan mode를 켰습니다. 승인 전에는 파일을 수정하지 않습니다.");
-      return;
-    }
     if (id === "model") {
       setMenu("model");
       return;
     }
     if (id === "fast") {
       patch({ effort: "low" });
-      setNotice("추론 강도를 Low로 낮췄습니다.");
+      setNotice(t("Reasoning effort is now Low."));
       return;
     }
     if (id === "chat") {
       patch({ runMode: "ask" });
       void persist({ mode: "ask" });
-      setNotice("Ask로 전환했습니다. 읽기와 검색만 합니다.");
+      setNotice(t("Switched to Ask. It explains only and does not change files."));
       return;
     }
     if (id === "review") {
-      void send("커밋되지 않은 변경을 검토해 주세요. git diff를 읽고 위험과 빠진 검증만 짧게 정리하세요. 파일은 수정하지 마세요.", "plan");
+      void send(t("Review the uncommitted changes. Read the git diff and briefly list the risks and missing checks. Do not edit files."), "ask");
       return;
     }
     if (id === "status") {
       setNotice(
-        `스레드 ${conversationId ?? "새 채팅"} · 메시지 ${messages.length} · ${settings.model || "모델 없음"} · 컨텍스트 ${settings.contextLength} · ${effortLabel(effort)} · ${approvalLabel(approval)}`,
+        t("Thread {thread} · {count} messages · {model} · context {context} · {effort} · {approval}", {
+          thread: conversationId ?? t("New chat"),
+          count: messages.length,
+          model: settings.model || t("No model"),
+          context: settings.contextLength,
+          effort: t(effortLabel(effort)),
+          approval: t(approvalLabel(approval)),
+        }),
       );
       return;
     }
     const next = personality === "pragmatic" ? "friendly" : "pragmatic";
     patch({ personality: next });
-    setNotice(next === "friendly" ? "성격을 Friendly로 바꿨습니다." : "성격을 Pragmatic으로 바꿨습니다.");
+    setNotice(next === "friendly" ? t("Personality is now Friendly.") : t("Personality is now Pragmatic."));
   }
 
   async function attachFile() {
-    const selected = await open({ multiple: false, title: "파일 첨부" });
+    const selected = await open({ multiple: false, title: t("Attach a file") });
     if (typeof selected !== "string") return;
     setText((value) => `${value}${value.endsWith(" ") || value.length === 0 ? "" : " "}${selected} `);
     setMenu(null);
@@ -217,11 +309,11 @@ export function Composer({ centered = false }: { centered?: boolean }) {
 
   const slashItems = SLASH.filter((item) => item.id.includes(filter) || item.label.toLowerCase().includes(filter));
   const skillItems = skillList.filter((skill) => skill.name.includes(filter));
-  const mentions = [
-    { id: "Computer", detail: "화면의 앱을 조작합니다" },
-    { id: "Browser", detail: "웹 페이지를 엽니다" },
-    ...PLUGINS.filter((plugin) => enabledPlugins.includes(plugin.id)).map((plugin) => ({ id: plugin.name, detail: plugin.description })),
-  ].filter((item) => item.id.toLowerCase().includes(filter));
+  const mentions = CAPABILITIES.filter((item) => enabledPlugins.includes(item.id) && item.name.toLowerCase().includes(filter)).map((item) => ({
+    id: item.name,
+    detail: item.description,
+  }));
+  const suggestions = intentSuggestions(attachments);
 
   return (
     <div className={`px-4 pb-4 ${centered ? "w-full max-w-[640px]" : "mx-auto w-full max-w-[720px]"}`}>
@@ -229,15 +321,15 @@ export function Composer({ centered = false }: { centered?: boolean }) {
         <div className="mb-2 flex items-center gap-2 rounded-full border border-line bg-panel px-3 py-1 text-xs text-muted">
           <span className="truncate">Goal · {goal}</span>
           <button className="ml-auto" onClick={() => setGoal(goalKey, "")}>
-            해제
+            {t("Clear")}
           </button>
         </div>
       ) : null}
       <div className="relative">
         {menu === "plus" ? (
           <Menu className="bottom-[calc(100%+8px)] left-0 w-72">
-            <MenuLabel>추가</MenuLabel>
-            <MenuButton onClick={() => void attachFile()}>파일</MenuButton>
+            <MenuLabel>{t("Add")}</MenuLabel>
+            <MenuButton onClick={() => void attachFile()}>{t("File")}</MenuButton>
             <MenuButton
               onClick={() => {
                 setMenu("goal");
@@ -245,22 +337,13 @@ export function Composer({ centered = false }: { centered?: boolean }) {
               }}
             >
               Goal
-              <span className="ml-auto text-xs text-muted">목표를 유지</span>
+              <span className="ml-auto text-xs text-muted">{t("Keep the goal")}</span>
             </MenuButton>
-            <MenuButton
-              onClick={() => {
-                patch({ runMode: runMode === "plan" ? "agent" : "plan" });
-                setMenu(null);
-              }}
-            >
-              Plan mode
-              <span className="ml-auto text-xs text-muted">{runMode === "plan" ? "켜짐" : "끄기"}</span>
-            </MenuButton>
-            <MenuLabel>플러그인</MenuLabel>
-            {PLUGINS.map((plugin) => (
-              <MenuButton key={plugin.id} onClick={() => insertToken(`@${plugin.name}`)} disabled={!enabledPlugins.includes(plugin.id)}>
-                {plugin.name}
-                <span className="ml-auto text-xs text-muted">{enabledPlugins.includes(plugin.id) ? plugin.description : "설정에서 켜기"}</span>
+            <MenuLabel>{t("Capabilities")}</MenuLabel>
+            {CAPABILITIES.map((capability) => (
+              <MenuButton key={capability.id} onClick={() => insertToken(`@${capability.name}`)} disabled={!enabledPlugins.includes(capability.id)}>
+                {capability.name}
+                <span className="ml-auto text-xs text-muted">{enabledPlugins.includes(capability.id) ? t(capability.description) : t("Turn on in Capabilities")}</span>
               </MenuButton>
             ))}
           </Menu>
@@ -270,7 +353,7 @@ export function Composer({ centered = false }: { centered?: boolean }) {
             {slashItems.map((item) => (
               <MenuButton key={item.id} onClick={() => runSlash(item.id)}>
                 /{item.id}
-                <span className="ml-auto truncate pl-3 text-xs text-muted">{item.detail}</span>
+                <span className="ml-auto truncate pl-3 text-xs text-muted">{t(item.detail)}</span>
               </MenuButton>
             ))}
           </Menu>
@@ -280,7 +363,7 @@ export function Composer({ centered = false }: { centered?: boolean }) {
             {skillItems.map((skill) => (
               <MenuButton key={skill.id} onClick={() => insertToken(`$${skill.name}`)}>
                 ${skill.name}
-                <span className="ml-auto truncate pl-3 text-xs text-muted">{skill.description}</span>
+                <span className="ml-auto truncate pl-3 text-xs text-muted">{t(skill.description)}</span>
               </MenuButton>
             ))}
           </Menu>
@@ -290,14 +373,14 @@ export function Composer({ centered = false }: { centered?: boolean }) {
             {mentions.map((item) => (
               <MenuButton key={item.id} onClick={() => insertToken(`@${item.id}`)}>
                 @{item.id}
-                <span className="ml-auto truncate pl-3 text-xs text-muted">{item.detail}</span>
+                <span className="ml-auto truncate pl-3 text-xs text-muted">{t(item.detail)}</span>
               </MenuButton>
             ))}
           </Menu>
         ) : null}
         {menu === "model" ? (
           <Menu className="bottom-[calc(100%+8px)] left-12 w-64">
-            <MenuLabel>모델</MenuLabel>
+            <MenuLabel>{t("Model")}</MenuLabel>
             {(models.length > 0 ? models : [settings.model].filter(Boolean)).map((model) => (
               <MenuButton
                 key={model}
@@ -310,7 +393,7 @@ export function Composer({ centered = false }: { centered?: boolean }) {
                 {model === settings.model ? <span className="ml-auto text-xs">✓</span> : null}
               </MenuButton>
             ))}
-            <MenuLabel>추론</MenuLabel>
+            <MenuLabel>{t("Reasoning")}</MenuLabel>
             {(["low", "medium", "high", "xhigh"] as Effort[]).map((item) => (
               <MenuButton
                 key={item}
@@ -319,7 +402,7 @@ export function Composer({ centered = false }: { centered?: boolean }) {
                   setMenu(null);
                 }}
               >
-                {effortLabel(item)}
+                {t(effortLabel(item))}
                 {effort === item ? <span className="ml-auto text-xs">✓</span> : null}
               </MenuButton>
             ))}
@@ -327,17 +410,17 @@ export function Composer({ centered = false }: { centered?: boolean }) {
         ) : null}
         {menu === "mode" ? (
           <Menu className="bottom-[calc(100%+8px)] left-36 w-56">
-            {(["ask", "plan", "agent"] as RunMode[]).map((item) => (
+            {(["ask", "do", "mission"] as RunMode[]).map((item) => (
               <MenuButton
                 key={item}
                 onClick={() => {
                   patch({ runMode: item });
-                  if (item !== "plan") void persist({ mode: item });
+                  void persist({ mode: item });
                   setMenu(null);
                 }}
               >
                 {runModeLabel(item)}
-                <span className="ml-auto text-xs text-muted">{item === "ask" ? "읽기" : item === "plan" ? "계획" : "실행"}</span>
+                <span className="ml-auto text-xs text-muted">{item === "ask" ? t("Explain only") : item === "do" ? t("One job") : t("See it through")}</span>
               </MenuButton>
             ))}
           </Menu>
@@ -346,9 +429,9 @@ export function Composer({ centered = false }: { centered?: boolean }) {
           <Menu className="bottom-[calc(100%+8px)] left-52 w-64">
             {(
               [
-                ["default", "작업 전 확인"],
-                ["auto", "파일 수정은 자동"],
-                ["full", "위험한 동작도 자동"],
+                ["default", "Ask before acting"],
+                ["auto", "Auto-approve file edits"],
+                ["full", "Auto-approve risky actions"],
               ] as const
             ).map(([id, detail]) => (
               <MenuButton
@@ -358,8 +441,8 @@ export function Composer({ centered = false }: { centered?: boolean }) {
                   setMenu(null);
                 }}
               >
-                {approvalLabel(id)}
-                <span className="ml-auto text-xs text-muted">{detail}</span>
+                {t(approvalLabel(id))}
+                <span className="ml-auto text-xs text-muted">{t(detail)}</span>
               </MenuButton>
             ))}
           </Menu>
@@ -373,30 +456,32 @@ export function Composer({ centered = false }: { centered?: boolean }) {
               }}
             >
               Local
-              <span className="ml-auto text-xs text-muted">이 폴더</span>
+              <span className="ml-auto text-xs text-muted">{t("This folder")}</span>
             </MenuButton>
             <MenuButton
+              disabled={plainChat}
               onClick={() => {
+                if (plainChat) return;
                 patch({ environment: "worktree" });
                 setMenu(null);
               }}
             >
               Worktree
-              <span className="ml-auto text-xs text-muted">Git 분리</span>
+              <span className="ml-auto text-xs text-muted">{t("Separate Git checkout")}</span>
             </MenuButton>
             <MenuButton disabled>
               Cloud
-              <span className="ml-auto text-xs text-muted">로컬 모델</span>
+              <span className="ml-auto text-xs text-muted">{t("Local model")}</span>
             </MenuButton>
           </Menu>
         ) : null}
         {menu === "goal" ? (
           <Menu className="bottom-[calc(100%+8px)] left-0 w-80 p-3">
-            <div className="mb-2 text-xs text-muted">이 스레드가 이어서 따라갈 목표</div>
+            <div className="mb-2 text-xs text-muted">{t("Goal this thread keeps following")}</div>
             <textarea className="field h-20 text-sm" value={goalDraft} onChange={(event) => setGoalDraft(event.target.value)} />
             <div className="mt-2 flex justify-end gap-2">
               <button className="rounded-md px-2 py-1 text-xs text-muted" onClick={() => setMenu(null)}>
-                취소
+                {t("Cancel")}
               </button>
               <button
                 className="rounded-full bg-white px-3 py-1 text-xs text-black"
@@ -405,16 +490,85 @@ export function Composer({ centered = false }: { centered?: boolean }) {
                   setMenu(null);
                 }}
               >
-                저장
+                {t("Save")}
               </button>
             </div>
           </Menu>
+        ) : null}
+        {suggestions.length > 0 ? (
+          <div className="mb-2 rounded-2xl border border-line bg-panel-2 px-3 py-3">
+            <div className="text-sm">{t("Do this")}</div>
+            <p className="mt-1 text-xs text-muted">{t("Look at {count} files and pick a job.", { count: attachments.length })}</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {suggestions.map((item) => (
+                <button
+                  key={item.label}
+                  className="rounded-full border border-line px-3 py-1 text-xs hover:bg-elev"
+                  onClick={() => {
+                    setAttachments([]);
+                    void send(`${t(item.prompt)}\n${attachments.join("\n")}`);
+                  }}
+                >
+                  {t(item.label)}
+                </button>
+              ))}
+              <button className="rounded-full px-3 py-1 text-xs text-muted" onClick={() => setAttachments([])}>
+                {t("Cancel")}
+              </button>
+            </div>
+          </div>
+        ) : null}
+        {proposal?.phase === "drafting" ? (
+          <div className="mb-2 flex items-center justify-between px-1 text-xs text-muted">
+            <span>{t("Checking what to do")}</span>
+            <button
+              onClick={() => {
+                setProposal(null);
+                void api.cancelTask().catch((error) => setBanner(explain(error)));
+              }}
+            >
+              {t("Cancel")}
+            </button>
+          </div>
+        ) : null}
+        {proposal?.phase === "ready" ? (
+          <div className="mb-2 rounded-2xl border border-line bg-panel-2 px-4 py-3">
+            {proposal.editing ? (
+              <textarea
+                className="field h-28 text-sm"
+                value={proposal.text}
+                onChange={(event) => setProposal({ ...proposal, text: event.target.value })}
+              />
+            ) : (
+              <p className="whitespace-pre-wrap text-sm leading-6">{proposal.text}</p>
+            )}
+            <div className="mt-3 flex items-center gap-2 text-sm">
+              <button className="rounded-full bg-white px-3 py-1.5 text-black" onClick={() => void approveProposal()}>
+                {t("Run")}
+              </button>
+              <button
+                className="rounded-full border border-line px-3 py-1.5"
+                onClick={() => setProposal({ ...proposal, editing: !proposal.editing })}
+              >
+                {t("Edit plan")}
+              </button>
+              <button
+                className="rounded-full px-3 py-1.5 text-muted"
+                onClick={() => {
+                  setProposal(null);
+                  if (running) void api.cancelTask().catch((error) => setBanner(explain(error)));
+                }}
+              >
+                {t("Cancel")}
+              </button>
+            </div>
+          </div>
         ) : null}
         <div className="rounded-[22px] border border-line bg-panel-2 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
           <textarea
             ref={box}
             className="max-h-40 min-h-[44px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15px] outline-none placeholder:text-muted"
-            placeholder={runMode === "plan" ? "계획을 세워 주세요" : "무엇을 작업할까요?"}
+            placeholder={plainChat ? t("Say what to do. New files go on the Desktop.") : t("Say what to do in this folder.")}
             value={text}
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={(event) => {
@@ -430,18 +584,18 @@ export function Composer({ centered = false }: { centered?: boolean }) {
             }}
           />
           <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
-            <IconButton title="추가" onClick={() => setMenu(menu === "plus" ? null : "plus")}>
+            <IconButton title={t("Add")} onClick={() => setMenu(menu === "plus" ? null : "plus")}>
               <IconPlus />
             </IconButton>
-            <Chip onClick={() => setMenu(menu === "model" ? null : "model")}>{settings.model ? shortModel(settings.model) : "모델"} · {effortLabel(effort)}</Chip>
-            <Chip onClick={() => setMenu(menu === "mode" ? null : "mode")}>{runModeLabel(runMode)}</Chip>
-            {runMode === "agent" ? <Chip onClick={() => setMenu(menu === "approval" ? null : "approval")}>{approvalLabel(approval)}</Chip> : null}
+            <Chip onClick={() => setMenu(menu === "model" ? null : "model")}>{settings.model ? shortModel(settings.model) : t("Model")} · {t(effortLabel(effort))}</Chip>
+            <Chip onClick={() => setMenu(menu === "mode" ? null : "mode")}>{t(runModeLabel(runMode))}</Chip>
+            {runMode !== "ask" ? <Chip onClick={() => setMenu(menu === "approval" ? null : "approval")}>{t(approvalLabel(approval))}</Chip> : null}
             <Chip onClick={() => setMenu(menu === "env" ? null : "env")}>{environment === "worktree" ? "Worktree" : "Local"}</Chip>
             <div className="ml-auto" />
             {running ? (
               <button
                 className="flex h-8 w-8 items-center justify-center rounded-full bg-white text-black"
-                title="중지"
+                title={t("Stop")}
                 onClick={() => void api.cancelTask().catch((error) => setBanner(explain(error)))}
               >
                 <IconStop />
@@ -449,7 +603,7 @@ export function Composer({ centered = false }: { centered?: boolean }) {
             ) : (
               <button
                 className="flex h-8 w-8 items-center justify-center rounded-full bg-white text-black disabled:bg-elev disabled:text-muted"
-                title="보내기"
+                title={t("Send")}
                 disabled={!text.trim()}
                 onClick={() => void send()}
               >
@@ -458,10 +612,35 @@ export function Composer({ centered = false }: { centered?: boolean }) {
             )}
           </div>
         </div>
+        {centered && messages.length === 0 && !proposal ? (
+          <div className="mt-4 flex flex-wrap justify-center gap-2">
+            {(plainChat ? CHAT_PROMPTS : FOLDER_PROMPTS).map((item) => (
+              <button
+                key={item.label}
+                className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:bg-elev hover:text-text"
+                onClick={() => void send(t(item.prompt), item.mode)}
+              >
+                {t(item.label)}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </div>
     </div>
   );
 }
+
+const CHAT_PROMPTS: { label: string; prompt: string; mode: RunMode }[] = [
+  { label: "Tidy the Desktop", prompt: "Look at the Desktop and show a plan that groups files by type. Do not touch other folders.", mode: "do" },
+  { label: "Make a note", prompt: "Create today's note on the Desktop. Do not overwrite existing files.", mode: "do" },
+  { label: "Summarize the latest document", prompt: "Find the newest document on the Desktop and summarize it briefly.", mode: "ask" },
+];
+
+const FOLDER_PROMPTS: { label: string; prompt: string; mode: RunMode }[] = [
+  { label: "Look through the folder", prompt: "Briefly explain this folder's structure and the important files. Do not change files.", mode: "ask" },
+  { label: "Find what to change", prompt: "Find only the things in this folder that are worth fixing now. Show edits as a plan.", mode: "do" },
+  { label: "Run tests", prompt: "Run this folder's build or tests and briefly list only the failures.", mode: "do" },
+];
 
 function shortModel(model: string): string {
   const name = model.split("/").at(-1) ?? model;

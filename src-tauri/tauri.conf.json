@@ -27,7 +27,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc1MDI0QTg4QjczNjEyM0YKUldRL0VqYTNpRW9DZFdxT3doYTRnRkM1a2I5b28zdGFSSFVBaXdmQ3V3bkpqSm10T1dFUFk0T04K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU2QzM1QkIzMzc3MjAyMUQKUldRZEFuSTNzMXZENXE1cG1DWk0yZUNkSDlSZ1BpNGwwTWRvMEROckhCc013THdnaUxtQkdOTTkK",
       "endpoints": [
         "https://github.com/OrcaCodeAgent/OrcaCode/releases/latest/download/latest.json"
       ]

@@ -29,7 +29,7 @@ pub fn fit_messages(messages: &[ChatMessage], max_chars: usize) -> Vec<ChatMessa
     fitted.extend(messages.iter().take(2).cloned());
     if chosen > 2 && chosen < messages.len() {
         fitted.push(ChatMessage::user(
-            "[이전 도구 기록 일부가 컨텍스트 한도로 생략되었습니다.]",
+            "[Some earlier tool results were omitted because of the context limit.]",
         ));
     }
     if chosen < messages.len() {
@@ -64,13 +64,21 @@ fn estimate_range(messages: &[ChatMessage], start: usize, end: usize) -> usize {
 }
 
 fn message_len(message: &ChatMessage) -> usize {
-    message.content.chars().count() + message.tool_name.as_deref().map(str::len).unwrap_or(0)
+    estimate_tokens(&message.content) + message.tool_name.as_deref().map(estimate_tokens).unwrap_or(0)
+}
+
+fn estimate_tokens(text: &str) -> usize {
+    let units: usize = text.chars().map(|ch| if ch.is_ascii() { 1 } else { 8 }).sum();
+    let tokens = units.div_ceil(4);
+    if text.is_empty() { 0 } else { tokens.max(1) }
 }
 
 fn shrink(message: &ChatMessage, budget: usize) -> ChatMessage {
     let mut cloned = message.clone();
-    cloned.content = truncate_observation(&cloned.content, budget.max(80));
-    cloned.images = None;
+    cloned.content = truncate_observation(&cloned.content, budget.saturating_mul(4).max(80));
+    if budget < 120 {
+        cloned.images = None;
+    }
     cloned
 }
 
@@ -88,12 +96,12 @@ mod tests {
             messages.push(ChatMessage::user(format!("tool result {index} {}", "x".repeat(400))));
         }
         messages.push(ChatMessage::assistant("latest"));
-        let fitted = fit_messages(&messages, 900);
+        let fitted = fit_messages(&messages, 220);
         let blob = fitted.iter().map(|message| message.content.clone()).collect::<Vec<_>>().join("\n");
         assert!(blob.contains("system prompt"));
         assert!(blob.contains("goal"));
         assert!(blob.contains("latest"));
-        assert!(blob.contains("생략"));
+        assert!(blob.contains("omitted"));
         assert!(!blob.contains("tool result 0"));
     }
 }

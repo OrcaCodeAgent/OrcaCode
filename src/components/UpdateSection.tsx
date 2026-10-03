@@ -3,11 +3,13 @@ import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
 import type { Update } from "@tauri-apps/plugin-updater";
 
+import { useT } from "../lib/i18n";
 import { findUpdate, updateError } from "../lib/updates";
 import { useUi } from "../stores/ui";
 
 export function UpdateSection() {
   const setNotice = useUi((state) => state.setNotice);
+  const t = useT();
   const pending = useRef<Update | null>(null);
   const [version, setVersion] = useState("0.1.0");
   const [available, setAvailable] = useState<string | null>(null);
@@ -29,7 +31,7 @@ export function UpdateSection() {
       const found = await findUpdate();
       pending.current = found;
       setAvailable(found?.version ?? null);
-      setNotice(found ? `버전 ${found.version} 업데이트가 있습니다.` : "이미 최신 버전입니다.");
+      setNotice(found ? t("Update {version} is available.", { version: found.version }) : t("Already up to date."));
     } catch (error) {
       const message = updateError(error);
       if (!message.includes("invoke")) setNotice(message);
@@ -56,16 +58,16 @@ export function UpdateSection() {
     <div className="rounded-xl border border-line bg-panel-2 px-4 py-3">
       <div className="flex items-center gap-3">
         <div className="min-w-0">
-          <div className="text-sm">Orca Code {version}</div>
-          <div className="mt-0.5 text-xs text-muted">{available ? `설치 가능한 버전 ${available}` : "GitHub Releases에서 새 버전을 확인합니다."}</div>
+          <div className="text-sm">Orca {version}</div>
+          <div className="mt-0.5 text-xs text-muted">{available ? t("Version {version} is ready to install", { version: available }) : t("Checks GitHub Releases for a new version.")}</div>
         </div>
         <button className="ml-auto shrink-0 rounded-md border border-line bg-elev px-3 py-1.5 text-sm disabled:opacity-50" disabled={phase !== "idle"} onClick={() => void look()}>
-          {phase === "checking" ? "확인 중" : "업데이트 확인"}
+          {phase === "checking" ? t("Checking...") : t("Check for updates")}
         </button>
       </div>
       {available ? (
         <button className="mt-3 rounded-md bg-text px-3 py-1.5 text-sm text-ink disabled:opacity-50" disabled={phase === "installing"} onClick={() => void install()}>
-          {phase === "installing" ? "설치 중" : "설치하고 다시 시작"}
+          {phase === "installing" ? t("Installing") : t("Install and restart")}
         </button>
       ) : null}
     </div>

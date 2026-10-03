@@ -7,7 +7,7 @@ pub fn accessibility_trusted() -> bool {
 }
 
 pub fn open_accessibility_settings() -> Result<(), String> {
-    Err("Linux 접근성 설정 연결은 아직 구현되지 않았습니다.".into())
+    Err("Opening Linux accessibility settings is not implemented yet.".into())
 }
 
 pub fn mouse_click(_x: f64, _y: f64, _button: &str) -> Result<(), String> {
@@ -31,5 +31,5 @@ pub fn shortcut(_key: &str, _modifiers: &[String]) -> Result<(), String> {
 }
 
 fn unsupported() -> Result<(), String> {
-    Err("이 운영체제에서는 아직 GUI 제어를 지원하지 않습니다.".into())
+    Err("GUI control is not supported on this operating system yet.".into())
 }

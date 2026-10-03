@@ -12,7 +12,7 @@ const fallback: Settings = {
   autoApproveFileEdits: true,
   terminalTimeoutMs: 120000,
   systemPrompt: "",
-  mode: "agent",
+  mode: "mission",
   workspacePath: null,
 };
 

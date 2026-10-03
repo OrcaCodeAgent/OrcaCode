@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
+import { useT } from "../lib/i18n";
 import { useSession } from "../stores/session";
 import { useUi } from "../stores/ui";
 import { selectWorkspace } from "../lib/workspace";
@@ -11,25 +12,31 @@ export function CommandPalette() {
   const setView = useSession((state) => state.setView);
   const newTask = useSession((state) => state.newTask);
   const [query, setQuery] = useState("");
+  const t = useT();
   const [index, setIndex] = useState(0);
 
   const actions = useMemo(
     () => [
-      { id: "new", label: "새 채팅", hint: "⌘N", run: () => { newTask(); setView("chat"); } },
-      { id: "folder", label: "폴더 열기", hint: "⌘O", run: () => void selectWorkspace() },
-      { id: "sidebar", label: "사이드바 전환", hint: "⌘B", run: () => patch({ sidebarOpen: !useUi.getState().sidebarOpen }) },
-      { id: "task", label: "작업 패널 전환", hint: "⌘J", run: () => patch({ taskOpen: !useUi.getState().taskOpen }) },
-      { id: "find", label: "채팅에서 찾기", hint: "⌘F", run: () => useUi.getState().setFind(true) },
-      { id: "plan", label: "Plan mode 전환", run: () => patch({ runMode: useUi.getState().runMode === "plan" ? "agent" : "plan" }) },
-      { id: "skills", label: "스킬", run: () => setView("skills") },
-      { id: "auto", label: "자동화", run: () => setView("automations") },
-      { id: "plugins", label: "플러그인", run: () => setView("plugins") },
-      { id: "settings", label: "설정", hint: "⌘,", run: () => setView("settings") },
+      { id: "new", label: "New chat", hint: "⌘N", run: () => { newTask(); setView("chat"); } },
+      { id: "folder", label: "Open folder", hint: "⌘O", run: () => void selectWorkspace().then((path) => { if (path) newTask(path); }) },
+      { id: "sidebar", label: "Toggle sidebar", hint: "⌘B", run: () => patch({ sidebarOpen: !useUi.getState().sidebarOpen }) },
+      { id: "task", label: "Toggle task panel", hint: "⌘J", run: () => patch({ taskOpen: !useUi.getState().taskOpen }) },
+      { id: "find", label: "Find in chat", hint: "⌘F", run: () => useUi.getState().setFind(true) },
+      { id: "ask", label: "Ask", run: () => patch({ runMode: "ask" }) },
+      { id: "do", label: "Do", run: () => patch({ runMode: "do" }) },
+      { id: "mission", label: "Mission", run: () => patch({ runMode: "mission" }) },
+      { id: "skills", label: "Skills", run: () => setView("skills") },
+      { id: "auto", label: "Automations", run: () => setView("automations") },
+      { id: "plugins", label: "Capabilities", run: () => setView("plugins") },
+      { id: "settings", label: "Settings", hint: "⌘,", run: () => setView("settings") },
     ],
     [newTask, patch, setView],
   );
 
-  const visible = actions.filter((action) => action.label.toLowerCase().includes(query.trim().toLowerCase()));
+  const visible = actions.filter((action) => {
+    const needle = query.trim().toLowerCase();
+    return action.label.toLowerCase().includes(needle) || t(action.label).toLowerCase().includes(needle);
+  });
 
   useEffect(() => {
     if (!open) {
@@ -53,7 +60,7 @@ export function CommandPalette() {
         <input
           autoFocus
           className="w-full bg-transparent px-4 py-3 text-sm outline-none"
-          placeholder="명령 검색"
+          placeholder={t("Search commands")}
           value={query}
           onChange={(event) => {
             setQuery(event.target.value);
@@ -76,7 +83,7 @@ export function CommandPalette() {
           }}
         />
         <div className="max-h-72 overflow-auto border-t border-line py-1">
-          {visible.length === 0 ? <div className="px-4 py-3 text-sm text-muted">일치하는 명령이 없습니다.</div> : null}
+          {visible.length === 0 ? <div className="px-4 py-3 text-sm text-muted">{t("No matching commands.")}</div> : null}
           {visible.map((action, position) => (
             <button
               key={action.id}
@@ -84,7 +91,7 @@ export function CommandPalette() {
               onMouseEnter={() => setIndex(position)}
               onClick={() => choose(position)}
             >
-              <span>{action.label}</span>
+              <span>{t(action.label)}</span>
               {action.hint ? <span className="ml-auto text-xs text-muted">{action.hint}</span> : null}
             </button>
           ))}

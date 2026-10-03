@@ -6,13 +6,17 @@ pub enum Mode {
     Agent,
     Ask,
     Plan,
+    Do,
+    Mission,
 }
 
 impl Mode {
     pub fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "ask" => Self::Ask,
-            "plan" => Self::Plan,
+            "plan" | "preview" => Self::Plan,
+            "do" => Self::Do,
+            "mission" => Self::Mission,
             _ => Self::Agent,
         }
     }
@@ -22,7 +26,13 @@ impl Mode {
             Self::Agent => "agent",
             Self::Ask => "ask",
             Self::Plan => "plan",
+            Self::Do => "do",
+            Self::Mission => "mission",
         }
+    }
+
+    pub fn mutates(self) -> bool {
+        matches!(self, Self::Agent | Self::Do | Self::Mission)
     }
 }
 
@@ -101,7 +111,10 @@ impl Settings {
         self.terminal_timeout_ms = self.terminal_timeout_ms.clamp(1_000, 600_000);
         self.mode = match Mode::parse(&self.mode) {
             Mode::Ask => "ask".to_string(),
-            _ => "agent".to_string(),
+            Mode::Do => "do".to_string(),
+            Mode::Mission => "mission".to_string(),
+            Mode::Plan => "plan".to_string(),
+            Mode::Agent => "agent".to_string(),
         };
         if let Some(path) = self.workspace_path.as_mut() {
             let trimmed = path.trim().to_string();
@@ -246,14 +259,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_plan_without_saving_it_as_the_default_mode() {
+    fn parses_ask_do_mission_and_preview() {
         assert_eq!(Mode::parse("plan"), Mode::Plan);
         assert_eq!(Mode::parse("ask"), Mode::Ask);
+        assert_eq!(Mode::parse("do"), Mode::Do);
+        assert_eq!(Mode::parse("mission"), Mode::Mission);
+        assert!(Mode::Do.mutates());
+        assert!(!Mode::Ask.mutates());
+        assert!(!Mode::Plan.mutates());
         let settings = Settings {
             mode: "plan".into(),
             ..Settings::default()
         }
         .normalized();
-        assert_eq!(settings.mode, "agent");
+        assert_eq!(settings.mode, "plan");
     }
 }

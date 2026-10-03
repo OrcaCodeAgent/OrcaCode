@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -42,13 +42,10 @@ impl ProcessManager {
 
     pub fn start(&self, command: &str, cwd: PathBuf) -> Result<String, String> {
         if command.trim().is_empty() {
-            return Err("빈 명령은 실행할 수 없습니다.".into());
+            return Err("An empty command cannot run.".into());
         }
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let mut process = Command::new(shell);
+        let mut process = crate::tools::terminal::shell_command(command);
         process
-            .arg("-lc")
-            .arg(command)
             .current_dir(&cwd)
             .env("ORCA_AGENT", "1")
             .stdin(Stdio::null())
@@ -61,7 +58,7 @@ impl ProcessManager {
         }
         let mut child = process.spawn().map_err(|error| {
             crate::logging::log_line("error", &format!("process spawn: {error}"));
-            "프로세스를 시작하지 못했습니다.".to_string()
+            "Could not start the process.".to_string()
         })?;
         let id = format!("p{}", &new_id().replace('-', "")[..8]);
         let output = Arc::new(Mutex::new(String::new()));
@@ -81,7 +78,7 @@ impl ProcessManager {
         };
         self.inner
             .lock()
-            .map_err(|_| "프로세스 목록을 잠그지 못했습니다.".to_string())?
+            .map_err(|_| "Could not lock the process list.".to_string())?
             .insert(id.clone(), info);
         Ok(id)
     }
@@ -108,8 +105,8 @@ impl ProcessManager {
         infos
     }
     pub fn output(&self, id: &str, max_chars: usize) -> Result<String, String> {
-        let inner = self.inner.lock().map_err(|_| "프로세스 목록을 잠그지 못했습니다.".to_string())?;
-        let process = inner.get(id).ok_or_else(|| "프로세스를 찾을 수 없습니다.".to_string())?;
+        let inner = self.inner.lock().map_err(|_| "Could not lock the process list.".to_string())?;
+        let process = inner.get(id).ok_or_else(|| "Could not find that process.".to_string())?;
         let text = process
             .output
             .lock()
@@ -127,15 +124,15 @@ impl ProcessManager {
         let mut inner = self
             .inner
             .lock()
-            .map_err(|_| "프로세스 목록을 잠그지 못했습니다.".to_string())?;
+            .map_err(|_| "Could not lock the process list.".to_string())?;
         let process = inner
             .get_mut(id)
-            .ok_or_else(|| "프로세스를 찾을 수 없습니다.".to_string())?;
+            .ok_or_else(|| "Could not find that process.".to_string())?;
         let pid = process.child.id();
         kill_pid(pid);
         let _ = process.child.wait();
         process.running = false;
-        Ok(format!("프로세스 {id}를 중지했습니다."))
+        Ok(format!("Stopped process {id}."))
     }
 }
 

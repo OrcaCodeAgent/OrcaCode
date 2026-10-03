@@ -2,9 +2,12 @@ import { create } from "zustand";
 
 import {
   BUILTIN_SKILLS,
+  CAPABILITIES,
+  normalizeRunMode,
   type Approval,
   type Automation,
   type Effort,
+  type Language,
   type Personality,
   type RunMode,
   type Skill,
@@ -27,30 +30,48 @@ interface Persisted {
   skills: Skill[];
   enabledPlugins: string[];
   automations: Automation[];
+  approvalMigrated: boolean;
+  language: Language;
 }
 
 const defaults: Persisted = {
   sidebarOpen: true,
   taskOpen: false,
   effort: "medium",
-  approval: "auto",
+  approval: "default",
   environment: "local",
-  runMode: "agent",
+  runMode: "mission",
   personality: "pragmatic",
   fontScale: 1,
   pinned: [],
   archived: [],
   goals: {},
   skills: [],
-  enabledPlugins: ["documents"],
+  enabledPlugins: CAPABILITIES.map((item) => item.id),
   automations: [],
+  approvalMigrated: true,
+  language: "en",
 };
 
 function load(): Persisted {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return defaults;
-    return { ...defaults, ...JSON.parse(raw) };
+    const stored = JSON.parse(raw) as Partial<Persisted>;
+    const parsed = { ...defaults, ...stored };
+    parsed.runMode = normalizeRunMode(String(parsed.runMode));
+    if (!stored.approvalMigrated && stored.approval === "auto") {
+      parsed.approval = "default";
+      parsed.approvalMigrated = true;
+      localStorage.setItem(KEY, JSON.stringify(parsed));
+    }
+    parsed.approvalMigrated = true;
+    if (parsed.language !== "en" && parsed.language !== "ko") parsed.language = "en";
+    const known = new Set(CAPABILITIES.map((item) => item.id));
+    if (!parsed.enabledPlugins.some((id) => known.has(id) && id !== "documents")) {
+      parsed.enabledPlugins = defaults.enabledPlugins;
+    }
+    return parsed;
   } catch {
     return defaults;
   }
@@ -78,6 +99,7 @@ interface UiStore extends Persisted {
   saveAutomation: (automation: Automation) => void;
   removeAutomation: (id: string) => void;
   markAutomation: (id: string, lastRun: number) => void;
+  finishAutomation: (id: string, succeeded: boolean) => void;
   markModeSynced: (runMode: RunMode) => void;
 }
 
@@ -97,6 +119,8 @@ function persist(state: Persisted) {
     skills: state.skills,
     enabledPlugins: state.enabledPlugins,
     automations: state.automations,
+    approvalMigrated: true,
+    language: state.language,
   };
   localStorage.setItem(KEY, JSON.stringify(next));
 }
@@ -156,8 +180,18 @@ export const useUi = create<UiStore>((set, get) => ({
   removeAutomation: (id) => get().patch({ automations: get().automations.filter((item) => item.id !== id) }),
   markAutomation: (id, lastRun) =>
     get().patch({
-      automations: get().automations.map((item) => (item.id === id ? { ...item, lastRun } : item)),
+      automations: get().automations.map((item) => (item.id === id ? { ...item, lastRun, retryAfter: undefined } : item)),
     }),
+  finishAutomation: (id, succeeded) => {
+    const now = Date.now();
+    get().patch({
+      automations: get().automations.map((item) => {
+        if (item.id !== id) return item;
+        if (succeeded) return { ...item, lastRun: now, retryAfter: undefined };
+        return { ...item, retryAfter: now + 5 * 60 * 1000 };
+      }),
+    });
+  },
   markModeSynced: (runMode) => set({ modeSynced: true, runMode }),
 }));
 

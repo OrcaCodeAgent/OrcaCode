@@ -1,15 +1,16 @@
 import { useEffect, useState } from "react";
 
-import { api, explain } from "../lib/api";
+import { api, explain, undoSummary } from "../lib/api";
+import { useT } from "../lib/i18n";
 import { useSession } from "../stores/session";
 import { useUi } from "../stores/ui";
 import { DiffView } from "./DiffView";
 
 const tabs = [
-  ["plan", "계획"],
-  ["files", "검토"],
-  ["sources", "출처"],
-  ["terminal", "터미널"],
+  ["plan", "Plan"],
+  ["files", "Review"],
+  ["sources", "Sources"],
+  ["terminal", "Terminal"],
 ] as const;
 
 export function Inspector() {
@@ -28,8 +29,11 @@ export function Inspector() {
   const setBanner = useSession((state) => state.setBanner);
   const setNotice = useUi((state) => state.setNotice);
   const [gitDiff, setGitDiff] = useState("");
+  const t = useT();
   const selected = fileChanges.find((change) => change.path === selectedDiff) ?? fileChanges.at(-1);
-  const sources = messages.filter((entry) => entry.kind === "tool" && ["read_file", "search_text", "search_files", "list_directory"].includes(entry.name));
+  const sources = messages.filter(
+    (entry) => entry.kind === "tool" && ["read_file", "read_document", "fetch_url", "search_text", "search_files", "list_directory"].includes(entry.name),
+  );
 
   useEffect(() => {
     if (tab !== "terminal") return;
@@ -41,7 +45,7 @@ export function Inspector() {
       <div className="flex border-b border-line">
         {tabs.map(([id, label]) => (
           <button key={id} className={`flex-1 border-b px-2 py-2.5 text-xs ${tab === id ? "border-text text-text" : "border-transparent text-muted"}`} onClick={() => setInspector(id)}>
-            {label}
+            {t(label)}
           </button>
         ))}
       </div>
@@ -50,7 +54,7 @@ export function Inspector() {
         {tab === "files" ? (
           <div>
             <div className="mb-3 flex items-center justify-between gap-2">
-              <span className="text-xs text-muted">{fileChanges.length}개 변경</span>
+              <span className="text-xs text-muted">{t("{count} changes", { count: fileChanges.length })}</span>
               <div className="flex gap-1">
                 <button
                   className="rounded-md border border-line px-2 py-1 text-xs"
@@ -68,11 +72,11 @@ export function Inspector() {
                     if (!taskId) return;
                     void api
                       .undoTask(taskId)
-                      .then(() => setNotice("에이전트가 만든 변경을 되돌렸습니다."))
+                      .then((report) => setNotice(undoSummary(report)))
                       .catch((error) => setBanner(explain(error)));
                   }}
                 >
-                  되돌리기
+                  {t("Undo")}
                 </button>
               </div>
             </div>
@@ -85,13 +89,13 @@ export function Inspector() {
                 {kindMark(change.kind)} {change.path}
               </button>
             ))}
-            {selected ? <DiffView diff={selected.diff} /> : <p className="text-xs text-muted">아직 검토할 변경이 없습니다.</p>}
+            {selected ? <DiffView diff={selected.diff} /> : <p className="text-xs text-muted">{t("No changes to review yet.")}</p>}
             {gitDiff ? <DiffView diff={gitDiff} /> : null}
           </div>
         ) : null}
         {tab === "sources" ? (
           <div className="space-y-2">
-            {sources.length === 0 ? <p className="text-xs text-muted">읽은 파일과 검색이 여기 모입니다.</p> : null}
+            {sources.length === 0 ? <p className="text-xs text-muted">{t("Files read and searches show up here.")}</p> : null}
             {sources.map((entry) =>
               entry.kind === "tool" ? (
                 <div key={entry.id} className="rounded-md px-1 py-1">
@@ -104,12 +108,12 @@ export function Inspector() {
         ) : null}
         {tab === "terminal" ? (
           <div className="space-y-2">
-            {processes.length === 0 ? <p className="text-xs text-muted">실행 중인 터미널이 없습니다.</p> : null}
+            {processes.length === 0 ? <p className="text-xs text-muted">{t("No terminal is running.")}</p> : null}
             {processes.map((process) => (
               <div key={process.id} className="rounded-xl border border-line p-2">
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-mono text-xs">{process.id}</span>
-                  <span className={process.running ? "text-ok" : "text-muted"}>{process.running ? "실행 중" : "종료"}</span>
+                  <span className={process.running ? "text-ok" : "text-muted"}>{process.running ? t("Running") : t("Exited")}</span>
                 </div>
                 <div className="mt-1 truncate text-xs text-muted">{process.command}</div>
                 <div className="mt-2 flex gap-2">
@@ -118,14 +122,14 @@ export function Inspector() {
                     onClick={() =>
                       void api
                         .readProcess(process.id)
-                        .then((output) => setNotice(output.slice(-500) || "출력이 없습니다."))
+                        .then((output) => setNotice(output.slice(-500) || t("No output.")))
                         .catch((error) => setBanner(explain(error)))
                     }
                   >
-                    출력
+                    {t("Output")}
                   </button>
                   <button className="rounded border border-line px-2 py-1 text-xs" onClick={() => void api.stopProcess(process.id).then(() => api.listProcesses().then(setProcesses))}>
-                    중지
+                    {t("Stop")}
                   </button>
                 </div>
               </div>
@@ -138,7 +142,8 @@ export function Inspector() {
 }
 
 function Plan({ steps }: { steps: { id: string; title: string; status: string }[] }) {
-  if (steps.length === 0) return <p className="text-xs text-muted">Plan mode이거나 작업이 길면 단계가 여기에 표시됩니다.</p>;
+  const t = useT();
+  if (steps.length === 0) return <p className="text-xs text-muted">{t("Steps show up here for a plan or a longer task.")}</p>;
   return (
     <ol className="space-y-2">
       {steps.map((step, index) => (

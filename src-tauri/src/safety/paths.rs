@@ -1,5 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
+use unicode_normalization::UnicodeNormalization;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPath {
     pub path: PathBuf,
@@ -52,10 +54,36 @@ pub fn resolve_path(workspace: &Path, input: &str) -> Result<ResolvedPath, PathE
             }
         }
     }
+    path = match_unicode_name(path);
     Ok(ResolvedPath {
         path,
         inside_workspace: inside,
     })
+}
+
+fn match_unicode_name(path: PathBuf) -> PathBuf {
+    if path.exists() {
+        return path;
+    }
+    let Some(parent) = path.parent() else {
+        return path;
+    };
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return path;
+    };
+    let wanted: String = name.nfc().collect();
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return path;
+    };
+    for entry in entries.flatten() {
+        let found = entry.file_name();
+        let found = found.to_string_lossy();
+        let folded: String = found.nfc().collect();
+        if folded == wanted {
+            return parent.join(entry.file_name());
+        }
+    }
+    path
 }
 
 fn nearest_existing(path: &Path) -> Option<&Path> {
@@ -153,7 +181,42 @@ pub const SKIP_DIRECTORIES: &[&str] = &[
 ];
 
 pub fn should_skip_dir(name: &str) -> bool {
-    SKIP_DIRECTORIES.contains(&name)
+    if SKIP_DIRECTORIES.contains(&name) {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".photoslibrary") || lower.ends_with(".app") || lower.ends_with(".bundle")
+}
+
+pub fn should_skip_entry(path: &Path, root: &Path) -> bool {
+    if path == root {
+        return false;
+    }
+    if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+        if should_skip_dir(name) {
+            return true;
+        }
+    }
+    if home_system_root(root) {
+        return false;
+    }
+    home_system_dir(path)
+}
+
+fn home_system_root(path: &Path) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let library = home.join("Library");
+    path == library || path.starts_with(&library)
+}
+
+fn home_system_dir(path: &Path) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let library = home.join("Library");
+    path == library || path.starts_with(&library) || path == home.join("Mail") || path == home.join(".Trash")
 }
 
 #[cfg(test)]

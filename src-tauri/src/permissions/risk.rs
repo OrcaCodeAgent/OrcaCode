@@ -42,7 +42,7 @@ pub fn assess_tool(name: &str, args: &Value, workspace: &Path, inherent: RiskLev
             Ok(resolved) => {
                 if !resolved.inside_workspace {
                     force_prompt = true;
-                    notes.push(format!("{key}가 작업 공간 밖에 있습니다"));
+                    notes.push(format!("{key} is outside the workspace"));
                     if is_write_tool(name) {
                         level = RiskLevel::Dangerous;
                     } else {
@@ -52,14 +52,14 @@ pub fn assess_tool(name: &str, args: &Value, workspace: &Path, inherent: RiskLev
                 if is_sensitive_path(&resolved.path) {
                     level = RiskLevel::Dangerous;
                     force_prompt = true;
-                    notes.push("민감한 경로입니다".into());
+                    notes.push("This is a sensitive path".into());
                 }
                 if is_write_tool(name) && (is_critical_path(&resolved.path) || resolved.path == normalize(workspace))
                 {
-                    hard_block = Some("작업 공간 루트나 시스템 경로는 변경할 수 없습니다.".into());
+                    hard_block = Some("The workspace root and system paths cannot be changed.".into());
                 }
             }
-            Err(_) => notes.push(format!("{key}가 비어 있습니다")),
+            Err(_) => notes.push(format!("{key} is empty")),
         }
     }
 
@@ -107,8 +107,8 @@ pub fn analyze_command(command: &str, cwd: Option<&str>, workspace: &Path) -> Ri
     if trimmed.is_empty() {
         return RiskReport {
             level: RiskLevel::Caution,
-            summary: "빈 명령입니다".into(),
-            hard_block: Some("빈 명령은 실행할 수 없습니다.".into()),
+            summary: "The command is empty".into(),
+            hard_block: Some("An empty command cannot run.".into()),
             force_prompt: false,
             fingerprint,
         };
@@ -150,7 +150,7 @@ pub fn analyze_command(command: &str, cwd: Option<&str>, workspace: &Path) -> Ri
 
     RiskReport {
         level,
-        summary: format!("터미널 · {} · {trimmed}", risk_label(level)),
+        summary: format!("Terminal · {} · {trimmed}", risk_label(level)),
         hard_block: None,
         force_prompt,
         fingerprint,
@@ -160,25 +160,25 @@ pub fn analyze_command(command: &str, cwd: Option<&str>, workspace: &Path) -> Ri
 fn catastrophic_block(command: &str, workspace: &Path) -> Option<String> {
     let compact = command.replace(' ', "");
     if compact.contains(":(){") || compact.contains(":(){:|:&};:") {
-        return Some("포크 폭탄으로 보이는 명령은 차단되었습니다.".into());
+        return Some("A command that looks like a fork bomb was blocked.".into());
     }
     for segment in split_segments(command) {
         let tokens = tokenize(&segment);
         let (program, rest) = program_and_args(&tokens);
         let program = program.as_deref().unwrap_or("");
         if matches!(program, "mkfs" | "newfs") {
-            return Some("디스크 포맷 명령은 차단되었습니다.".into());
+            return Some("A disk format command was blocked.".into());
         }
         if program == "diskutil" {
             let lower = rest.join(" ").to_ascii_lowercase();
             if lower.contains("erase") || lower.contains("partition") {
-                return Some("diskutil 삭제/파티션 명령은 차단되었습니다.".into());
+                return Some("A diskutil erase or partition command was blocked.".into());
             }
         }
         if program == "dd" {
             let joined = rest.join(" ");
             if joined.contains("of=/dev/") || joined.contains("of= /dev/") {
-                return Some("장치로 기록하는 dd 명령은 차단되었습니다.".into());
+                return Some("A dd command that writes to a device was blocked.".into());
             }
         }
         if program == "rm" || (program == "sudo" && rest.iter().any(|token| token == "rm")) {
@@ -194,7 +194,7 @@ fn catastrophic_block(command: &str, workspace: &Path) -> Option<String> {
             };
             for target in rm_targets(&rm_args) {
                 if rm_target_is_critical(&target, workspace) {
-                    return Some("시스템 경로, 홈 디렉터리, 작업 공간 전체 삭제는 차단되었습니다.".into());
+                    return Some("Deleting a system path, the home directory, or the whole workspace was blocked.".into());
                 }
             }
         }
@@ -204,7 +204,7 @@ fn catastrophic_block(command: &str, workspace: &Path) -> Option<String> {
                 || token.starts_with(">/dev/nvme")
                 || token == "/dev/disk"
             {
-                return Some("디스크 장치로 향하는 출력은 차단되었습니다.".into());
+                return Some("Output directed at a disk device was blocked.".into());
             }
         }
     }
@@ -606,9 +606,9 @@ pub fn tokenize(segment: &str) -> Vec<String> {
 
 fn risk_label(level: RiskLevel) -> &'static str {
     match level {
-        RiskLevel::Safe => "낮음",
-        RiskLevel::Caution => "주의",
-        RiskLevel::Dangerous => "높음",
+        RiskLevel::Safe => "low",
+        RiskLevel::Caution => "caution",
+        RiskLevel::Dangerous => "high",
     }
 }
 

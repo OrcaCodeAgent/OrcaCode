@@ -1,8 +1,10 @@
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { api, explain } from "./api";
+import { translate } from "./i18n";
 import { useSession } from "../stores/session";
 import { useSettings } from "../stores/settings";
+import { useUi } from "../stores/ui";
 
 export async function selectWorkspace(path?: string) {
   const selected =
@@ -10,7 +12,7 @@ export async function selectWorkspace(path?: string) {
     (await open({
       directory: true,
       multiple: false,
-      title: "프로젝트 폴더",
+      title: translate(useUi.getState().language, "Project folder"),
     }));
   if (typeof selected !== "string") return null;
   const session = useSession.getState();

@@ -157,7 +157,7 @@ impl Database {
     pub fn open(path: &Path) -> AppResult<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
-                AppError::message(format!("데이터 폴더를 만들지 못했습니다: {error}"))
+                AppError::message(format!("Could not create the data folder: {error}"))
             })?;
         }
         let conn = Connection::open(path)?;
@@ -194,7 +194,7 @@ impl Database {
 
     pub fn save_settings(&self, settings: &Settings) -> AppResult<()> {
         let json = serde_json::to_string(settings).map_err(|error| {
-            AppError::message(format!("설정을 직렬화하지 못했습니다: {error}"))
+            AppError::message(format!("Could not save settings: {error}"))
         })?;
         self.lock().execute(
             "INSERT INTO settings (key, value) VALUES ('settings', ?1)
@@ -265,7 +265,7 @@ impl Database {
     pub fn rename_conversation(&self, id: &str, title: &str) -> AppResult<()> {
         let title = title.trim();
         if title.is_empty() {
-            return Err(crate::error::AppError::message("제목을 입력해주세요."));
+            return Err(crate::error::AppError::message("Enter a title."));
         }
         let title: String = title.chars().take(80).collect();
         let changed = self.lock().execute(
@@ -273,7 +273,7 @@ impl Database {
             params![title, now_ms(), id],
         )?;
         if changed == 0 {
-            return Err(crate::error::AppError::message("대화를 찾지 못했습니다."));
+            return Err(crate::error::AppError::message("Could not find that conversation."));
         }
         Ok(())
     }
@@ -557,13 +557,13 @@ impl Database {
         if let Some(meta) = &metadata {
             if meta.is_file() && meta.len() > 20_000_000 {
                 return Err(AppError::message(
-                    "20MB보다 큰 파일은 스냅샷을 만들 수 없어 수정하지 않았습니다.",
+                    "Files larger than 20MB cannot be snapshotted, so this file was not changed.",
                 ));
             }
         }
         let content = if existed && !is_dir {
             Some(fs::read(path).map_err(|error| {
-                AppError::message(format!("원본 파일을 읽지 못했습니다: {error}"))
+                AppError::message(format!("Could not read the original file: {error}"))
             })?)
         } else {
             None
@@ -600,7 +600,7 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn undo_task(&self, task_id: &str) -> AppResult<Vec<String>> {
+    pub fn undo_task(&self, task_id: &str) -> AppResult<(Vec<String>, Vec<String>)> {
         let rows = {
             let conn = self.lock();
             let mut stmt = conn.prepare(
@@ -617,44 +617,111 @@ impl Database {
             mapped.collect::<Result<Vec<_>, _>>()?
         };
         if rows.is_empty() {
-            return Err(AppError::message("되돌릴 에이전트 변경이 없습니다."));
+            return Err(AppError::message("There are no agent changes to undo."));
         }
         let mut restored = Vec::new();
-        let mut created: Vec<&SnapshotRow> = rows.iter().filter(|row| !row.existed).collect();
-        created.sort_by_key(|row| std::cmp::Reverse(Path::new(&row.path).components().count()));
-        for row in created {
+        let mut skipped = Vec::new();
+        let mut created_dirs: Vec<&SnapshotRow> = rows.iter().filter(|row| !row.existed && row.is_dir).collect();
+        created_dirs.sort_by_key(|row| std::cmp::Reverse(Path::new(&row.path).components().count()));
+        let existed_dirs: Vec<&SnapshotRow> = rows.iter().filter(|row| row.existed && row.is_dir).collect();
+        let mut created_counts: std::collections::HashMap<std::ffi::OsString, usize> = std::collections::HashMap::new();
+        for row in &created_dirs {
+            if let Some(name) = Path::new(&row.path).file_name() {
+                *created_counts.entry(name.to_os_string()).or_default() += 1;
+            }
+        }
+        let mut missing_sources: std::collections::HashMap<std::ffi::OsString, Vec<&SnapshotRow>> = std::collections::HashMap::new();
+        for row in &existed_dirs {
+            let path = Path::new(&row.path);
+            if path.exists() {
+                continue;
+            }
+            if let Some(name) = path.file_name() {
+                missing_sources.entry(name.to_os_string()).or_default().push(row);
+            }
+        }
+        let mut used_sources = std::collections::HashSet::new();
+        let mut renamed_destinations = Vec::new();
+        for row in &created_dirs {
             let path = PathBuf::from(&row.path);
-            if path.is_dir() {
-                let _ = fs::remove_dir_all(&path);
-            } else if path.exists() {
+            let Some(name) = path.file_name().map(|name| name.to_os_string()) else {
+                continue;
+            };
+            let sources = missing_sources.get(&name).map(Vec::as_slice).unwrap_or(&[]);
+            let unique = created_counts.get(&name).copied().unwrap_or(0) == 1 && sources.len() == 1;
+            if unique && path.exists() {
+                let source = sources[0];
+                if let Some(parent) = Path::new(&source.path).parent() {
+                    fs::create_dir_all(parent).map_err(|error| {
+                        AppError::message(format!("Could not create the parent folder: {error}"))
+                    })?;
+                }
+                fs::rename(&path, &source.path).map_err(|error| {
+                    AppError::message(format!("Could not move {} back: {error}", row.path))
+                })?;
+                used_sources.insert(source.path.clone());
+                renamed_destinations.push(path);
+                restored.push(source.path.clone());
+            }
+        }
+        for row in rows.iter().filter(|row| !row.existed && !row.is_dir) {
+            let path = PathBuf::from(&row.path);
+            if renamed_destinations.iter().any(|dir| path.starts_with(dir)) {
+                continue;
+            }
+            if path.exists() {
                 fs::remove_file(&path).map_err(|error| {
-                    AppError::message(format!("{} 삭제에 실패했습니다: {error}", row.path))
+                    AppError::message(format!("Could not delete {}: {error}", row.path))
                 })?;
             }
+            restored.push(row.path.clone());
+        }
+        for row in &created_dirs {
+            if restored.iter().any(|item| item == &row.path) || used_sources.contains(&row.path) {
+                continue;
+            }
+            let path = PathBuf::from(&row.path);
+            if renamed_destinations.iter().any(|dir| path == *dir) {
+                continue;
+            }
+            if !path.exists() {
+                restored.push(row.path.clone());
+                continue;
+            }
+            let non_empty = path.read_dir().map(|mut items| items.next().is_some()).unwrap_or(false);
+            if non_empty {
+                skipped.push(row.path.clone());
+                continue;
+            }
+            fs::remove_dir_all(&path).map_err(|error| {
+                AppError::message(format!("Could not delete {}: {error}", row.path))
+            })?;
             restored.push(row.path.clone());
         }
         for row in rows.iter().filter(|row| row.existed) {
             let path = PathBuf::from(&row.path);
             if row.is_dir {
-                fs::create_dir_all(&path).map_err(|error| {
-                    AppError::message(format!("디렉터리를 복원하지 못했습니다: {error}"))
-                })?;
+                if !used_sources.contains(&row.path) {
+                    fs::create_dir_all(&path).map_err(|error| {
+                        AppError::message(format!("Could not restore the directory: {error}"))
+                    })?;
+                }
             } else if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|error| {
-                    AppError::message(format!("상위 폴더를 만들지 못했습니다: {error}"))
+                    AppError::message(format!("Could not create the parent folder: {error}"))
                 })?;
                 let mut file = OpenOptions::new()
                     .create(true)
                     .write(true)
                     .truncate(true)
                     .open(&path)
-                    .map_err(|error| AppError::message(format!("파일을 복원하지 못했습니다: {error}")))?;
+                    .map_err(|error| AppError::message(format!("Could not restore the file: {error}")))?;
                 file.write_all(row.content.as_deref().unwrap_or_default())
-                    .map_err(|error| AppError::message(format!("파일을 복원하지 못했습니다: {error}")))?;
+                    .map_err(|error| AppError::message(format!("Could not restore the file: {error}")))?;
             }
             restored.push(row.path.clone());
         }
-        Ok(restored)
+        Ok((restored, skipped))
     }
 }
 

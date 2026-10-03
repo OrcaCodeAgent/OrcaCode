@@ -31,7 +31,7 @@ impl OllamaClient {
         let http = Client::builder()
             .connect_timeout(Duration::from_secs(3))
             .build()
-            .map_err(|error| AppError::message(format!("HTTP 클라이언트를 만들지 못했습니다: {error}")))?;
+            .map_err(|error| AppError::message(format!("Could not create the HTTP client: {error}")))?;
         Ok(Self { http })
     }
 
@@ -39,7 +39,7 @@ impl OllamaClient {
         match self.models(base).await {
             Ok(_) => OllamaStatus {
                 online: true,
-                message: "Ollama에 연결되었습니다.".into(),
+                message: "Connected to Ollama.".into(),
             },
             Err(error) => OllamaStatus {
                 online: false,
@@ -78,6 +78,22 @@ impl OllamaClient {
         Ok(models)
     }
 
+    pub async fn unload(&self, base: &str, model: &str) -> AppResult<()> {
+        let response = self
+            .http
+            .post(format!("{}/api/generate", trim_base(base)))
+            .json(&json!({ "model": model, "keep_alive": 0 }))
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(map_reqwest)?;
+        if !response.status().is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(ollama_error(&text));
+        }
+        Ok(())
+    }
+
     pub async fn pull(&self, base: &str, name: &str, mut on_status: impl FnMut(String, u64, u64)) -> AppResult<()> {
         let response = self
             .http
@@ -105,7 +121,7 @@ impl OllamaClient {
                 if let Some(error) = value.get("error").and_then(Value::as_str) {
                     return Err(AppError::message(error.to_string()));
                 }
-                let status = value.get("status").and_then(Value::as_str).unwrap_or("받는 중").to_string();
+                let status = value.get("status").and_then(Value::as_str).unwrap_or("downloading").to_string();
                 let completed = value.get("completed").and_then(Value::as_u64).unwrap_or(0);
                 let total = value.get("total").and_then(Value::as_u64).unwrap_or(0);
                 on_status(status, completed, total);
@@ -132,7 +148,7 @@ impl OllamaClient {
             "model": model,
             "messages": messages,
             "stream": true,
-            "keep_alive": "15m",
+            "keep_alive": "5m",
             "options": {
                 "temperature": temperature,
                 "num_ctx": num_ctx
@@ -174,7 +190,7 @@ impl OllamaClient {
                 }
                 let value: Value = serde_json::from_str(&line).map_err(|error| {
                     crate::logging::log_line("error", &format!("ollama stream: {error}"));
-                    AppError::message("Ollama 응답을 해석하지 못했습니다.")
+                    AppError::message("Could not parse the Ollama response.")
                 })?;
                 if let Some(error) = value.get("error").and_then(Value::as_str) {
                     return Err(ollama_error(error));
@@ -278,7 +294,7 @@ fn ollama_error(raw: &str) -> AppError {
         AppError::OllamaConnection
     } else {
         crate::logging::log_line("error", &extracted);
-        AppError::message("Ollama가 요청을 처리하지 못했습니다. 모델이 설치되어 있고 서버가 실행 중인지 확인해주세요.")
+        AppError::message("Ollama could not handle the request. Check that the model is installed and the server is running.")
     }
 }
 

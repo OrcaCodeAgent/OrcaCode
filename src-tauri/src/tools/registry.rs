@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use crate::domain::{Mode, RiskLevel, ToolOutput};
 use crate::safety::redact::redact_secrets;
 use crate::tools::context::ToolCtx;
-use crate::tools::{fs, git, gui, plan};
+use crate::tools::{document, fs, git, gui, plan, web};
 
 #[derive(Clone, Debug)]
 pub struct ToolDef {
@@ -30,14 +30,14 @@ impl ToolRegistry {
 
     pub fn allowed(&self, name: &str, mode: Mode) -> bool {
         self.get(name)
-            .map(|tool| mode == Mode::Agent || tool.read_only)
+            .map(|tool| mode.mutates() || tool.read_only)
             .unwrap_or(false)
     }
 
     pub fn schemas(&self, mode: Mode) -> Vec<Value> {
         self.tools
             .iter()
-            .filter(|tool| mode == Mode::Agent || tool.read_only)
+            .filter(|tool| mode.mutates() || tool.read_only)
             .map(|tool| {
                 json!({
                     "type": "function",
@@ -65,6 +65,8 @@ fn dispatch(name: &str, args: &Value, ctx: &ToolCtx) -> ToolOutput {
     match name {
         "list_directory" => fs::list_directory(args, ctx),
         "read_file" => fs::read_file(args, ctx),
+        "read_document" => document::read_document(args, ctx),
+        "fetch_url" => web::fetch_url(args),
         "write_file" => fs::write_file(args, ctx),
         "edit_file" => fs::edit_file(args, ctx),
         "create_directory" => fs::create_directory(args, ctx),
@@ -95,23 +97,23 @@ fn dispatch(name: &str, args: &Value, ctx: &ToolCtx) -> ToolOutput {
         "mouse_click" => gui::mouse_click(args),
         "mouse_move" => gui::mouse_move(args),
         "scroll" => gui::scroll(args),
-        other => ToolOutput::fail(format!("존재하지 않는 도구입니다: {other}")),
+        other => ToolOutput::fail(format!("Unknown tool: {other}")),
     }
 }
 
 fn terminal(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(command) = args.get("command").and_then(Value::as_str) else {
-        return ToolOutput::fail("command가 필요합니다.");
+        return ToolOutput::fail("command is required.");
     };
     let cwd = match args.get("cwd").and_then(Value::as_str) {
         Some(raw) if !raw.trim().is_empty() => match crate::safety::paths::resolve_path(&ctx.workspace, raw) {
             Ok(path) => path.path,
-            Err(_) => return ToolOutput::fail("cwd가 비어 있습니다."),
+            Err(_) => return ToolOutput::fail("cwd is empty."),
         },
         _ => ctx.workspace.clone(),
     };
     if !cwd.exists() {
-        return ToolOutput::fail("작업 디렉터리가 없습니다.");
+        return ToolOutput::fail("The working directory does not exist.");
     }
     let timeout_ms = args.get("timeout").and_then(Value::as_u64).unwrap_or(ctx.timeout.as_millis() as u64);
     let timeout = std::time::Duration::from_millis(timeout_ms.clamp(1_000, 600_000));
@@ -129,12 +131,12 @@ fn terminal(args: &Value, ctx: &ToolCtx) -> ToolOutput {
 
 fn process_start(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(command) = args.get("command").and_then(Value::as_str) else {
-        return ToolOutput::fail("command가 필요합니다.");
+        return ToolOutput::fail("command is required.");
     };
     let cwd = match args.get("cwd").and_then(Value::as_str) {
         Some(raw) if !raw.trim().is_empty() => match crate::safety::paths::resolve_path(&ctx.workspace, raw) {
             Ok(path) => path.path,
-            Err(_) => return ToolOutput::fail("cwd가 비어 있습니다."),
+            Err(_) => return ToolOutput::fail("cwd is empty."),
         },
         _ => ctx.workspace.clone(),
     };
@@ -147,7 +149,7 @@ fn process_start(args: &Value, ctx: &ToolCtx) -> ToolOutput {
 fn process_list(ctx: &ToolCtx) -> ToolOutput {
     let list = ctx.processes.list();
     if list.is_empty() {
-        return ToolOutput::ok("실행 중인 관리 프로세스가 없습니다.");
+        return ToolOutput::ok("No managed process is running.");
     }
     let lines = list
         .iter()
@@ -167,7 +169,7 @@ fn process_list(ctx: &ToolCtx) -> ToolOutput {
 
 fn process_stop(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(id) = args.get("process_id").and_then(Value::as_str) else {
-        return ToolOutput::fail("process_id가 필요합니다.");
+        return ToolOutput::fail("process_id is required.");
     };
     match ctx.processes.stop(id) {
         Ok(message) => ToolOutput::ok(message),
@@ -177,7 +179,7 @@ fn process_stop(args: &Value, ctx: &ToolCtx) -> ToolOutput {
 
 fn process_read(args: &Value, ctx: &ToolCtx) -> ToolOutput {
     let Some(id) = args.get("process_id").and_then(Value::as_str) else {
-        return ToolOutput::fail("process_id가 필요합니다.");
+        return ToolOutput::fail("process_id is required.");
     };
     let max_chars = args.get("max_chars").and_then(Value::as_u64).unwrap_or(8_000) as usize;
     match ctx.processes.output(id, max_chars.clamp(200, 20_000)) {
@@ -190,12 +192,14 @@ fn definitions() -> Vec<ToolDef> {
     vec![
         def("list_directory", "List one directory level.", json!({"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"integer"}},"required":[]}), RiskLevel::Safe, true),
         def("read_file", "Read a line range of a text file. Lines are 1-based. Defaults to 200 lines.", json!({"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer"},"end_line":{"type":"integer"}},"required":["path"]}), RiskLevel::Safe, true),
+        def("read_document", "Extract text from a PDF, Word, Excel, PowerPoint, or other document on this computer.", json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}), RiskLevel::Safe, true),
+        def("fetch_url", "Read the public text of an http(s) page. Does not use a signed-in browser.", json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}), RiskLevel::Safe, true),
         def("write_file", "Create a new file. Fails if the file already exists.", json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}), RiskLevel::Caution, false),
         def("edit_file", "Replace a unique old_string in an existing file, or apply a unified diff.", json!({"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"},"diff":{"type":"string"}},"required":["path"]}), RiskLevel::Caution, false),
         def("create_directory", "Create a directory.", json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}), RiskLevel::Caution, false),
         def("move_file", "Move a file or directory inside the workspace.", json!({"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"overwrite":{"type":"boolean"}},"required":["from","to"]}), RiskLevel::Caution, false),
         def("copy_file", "Copy a file or directory.", json!({"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"overwrite":{"type":"boolean"}},"required":["from","to"]}), RiskLevel::Caution, false),
-        def("delete_file", "Delete a file. Directories require recursive true and approval.", json!({"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean"}},"required":["path"]}), RiskLevel::Dangerous, false),
+        def("delete_file", "Move a file or directory to the Trash. Directories require recursive true and approval.", json!({"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean"}},"required":["path"]}), RiskLevel::Dangerous, false),
         def("search_files", "Find files by name.", json!({"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}), RiskLevel::Safe, true),
         def("search_text", "Search text inside the workspace. Skips dependencies and secret files.", json!({"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"case_sensitive":{"type":"boolean"},"limit":{"type":"integer"}},"required":["query"]}), RiskLevel::Safe, true),
         def("terminal_execute", "Run a command that is expected to exit. Returns stdout, stderr, and exit code.", json!({"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout":{"type":"integer"}},"required":["command"]}), RiskLevel::Safe, false),

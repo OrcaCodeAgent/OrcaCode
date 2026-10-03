@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::agent::cancel::CancelFlag;
 use crate::domain::Mode;
-use crate::safety::paths::{relative_display, should_skip_dir};
+use crate::safety::paths::{relative_display, should_skip_entry};
 use crate::safety::truncate::truncate_observation;
 use crate::tools::terminal::run_command;
 
@@ -60,11 +60,11 @@ fn top_level(workspace: &Path) -> String {
     };
     let mut names = entries
         .flatten()
+        .filter(|entry| !should_skip_entry(&entry.path(), workspace))
         .map(|entry| {
             let dir = entry.path().is_dir();
             format!("{}{}", entry.file_name().to_string_lossy(), if dir { "/" } else { "" })
         })
-        .filter(|name| !should_skip_dir(name.trim_end_matches('/')))
         .collect::<Vec<_>>();
     names.sort();
     for name in names.into_iter().take(80) {

@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { translate } from "./i18n";
+import { useUi } from "../stores/ui";
 import type {
   ConversationDetail,
   ConversationSummary,
@@ -13,10 +15,32 @@ export interface SettingsPayload {
   defaultPrompt: string;
 }
 
-export function explain(error: unknown): string {
+export interface UndoReport {
+  restored: string[];
+  skipped: string[];
+}
+
+export function rawMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) return error;
   if (error instanceof Error && error.message.trim()) return error.message;
-  return "요청을 처리하지 못했습니다.";
+  return "Could not complete the request.";
+}
+
+export function undoSummary(report: UndoReport): string {
+  const language = useUi.getState().language;
+  if (report.skipped.length > 0) {
+    return translate(language, "Restored {restored}. Left {skipped} folders in place because they were not empty.", {
+      restored: report.restored.length,
+      skipped: report.skipped.length,
+    });
+  }
+  return report.restored.length > 0
+    ? translate(language, "Restored {count} files.", { count: report.restored.length })
+    : translate(language, "No file snapshot to restore.");
+}
+
+export function explain(error: unknown): string {
+  return translate(useUi.getState().language, rawMessage(error));
 }
 
 export const api = {
@@ -35,6 +59,7 @@ export const api = {
   ollamaModels: () => invoke<string[]>("ollama_models"),
   ollamaPresent: () => invoke<boolean>("ollama_present"),
   pullOllamaModel: (name: string) => invoke<void>("pull_ollama_model", { name }),
+  unloadOllamaModel: (name: string) => invoke<void>("unload_ollama_model", { name }),
   installOllama: () => invoke<string>("install_ollama"),
   bootstrapRuntime: () => invoke<{ online: boolean; model: string; models: string[] }>("bootstrap_runtime"),
   ensureOllamaServer: () => invoke<void>("ensure_ollama_server"),
@@ -46,11 +71,15 @@ export const api = {
     approval?: string;
     effort?: string;
     instructions?: string;
+    recordUser?: boolean;
   }) => invoke<{ conversationId: string; taskId: string }>("start_task", { request }),
+  computerHome: () => invoke<string>("computer_home"),
+  computerDesktop: () => invoke<string>("computer_desktop"),
+  setRunsInBackground: (enabled: boolean) => invoke<void>("set_runs_in_background", { enabled }),
   cancelTask: () => invoke<void>("cancel_task"),
   respondPermission: (requestId: string, decision: "allow" | "once" | "deny") =>
     invoke<void>("respond_permission", { answer: { requestId, decision } }),
-  undoTask: (taskId: string) => invoke<string[]>("undo_task", { taskId }),
+  undoTask: (taskId: string) => invoke<UndoReport>("undo_task", { taskId }),
   listProcesses: () => invoke<ProcessInfo[]>("list_processes"),
   readProcess: (id: string) => invoke<string>("read_process", { id }),
   stopProcess: (id: string) => invoke<string>("stop_process", { id }),

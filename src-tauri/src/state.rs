@@ -125,6 +125,7 @@ pub struct AppState {
     pub processes: std::sync::Arc<ProcessManager>,
     pub ollama: OllamaClient,
     pub host: crate::ollama::host::OllamaHost,
+    pub keep_alive: std::sync::atomic::AtomicBool,
 }
 
 pub fn emit(app: &AppHandle, event: AgentEvent) {

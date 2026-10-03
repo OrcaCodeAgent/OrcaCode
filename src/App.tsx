@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 import { ArchiveView } from "./components/ArchiveView";
 import { AutomationsView } from "./components/AutomationsView";
@@ -17,7 +18,8 @@ import { IconClose, IconSidebar } from "./components/icons";
 import { Logo } from "./components/Logo";
 import { api, explain } from "./lib/api";
 import { findUpdate } from "./lib/updates";
-import { buildInstructions, cadenceMs } from "./lib/catalog";
+import { automationDue, buildInstructions, isPlainChat, normalizeRunMode, samePath, scopeInstructions } from "./lib/catalog";
+import { translate, useT } from "./lib/i18n";
 import { selectWorkspace } from "./lib/workspace";
 import { allSkills, useUi } from "./stores/ui";
 import { isRunning, useSession } from "./stores/session";
@@ -28,6 +30,7 @@ export function App() {
   const view = useSession((state) => state.view);
   const banner = useSession((state) => state.banner);
   const workspacePath = useSession((state) => state.workspacePath);
+  const desktopPath = useSession((state) => state.desktopPath);
   const messages = useSession((state) => state.messages);
   const setWorkspace = useSession((state) => state.setWorkspace);
   const setOllama = useSession((state) => state.setOllama);
@@ -47,9 +50,15 @@ export function App() {
   const setPalette = useUi((state) => state.setPalette);
   const setFind = useUi((state) => state.setFind);
   const setNotice = useUi((state) => state.setNotice);
+  const language = useUi((state) => state.language);
+  const t = useT();
   const [boot, setBoot] = useState<"pending" | "ready" | "error">("pending");
   const [bootError, setBootError] = useState<string | null>(null);
   const [bootVisible, setBootVisible] = useState(false);
+
+  useEffect(() => {
+    document.documentElement.lang = language;
+  }, [language]);
 
   useEffect(() => {
     if (boot === "ready") {
@@ -71,9 +80,13 @@ export function App() {
         const payload = await api.getSettings();
         setSettings(payload.settings, payload.defaultPrompt);
         if (!useUi.getState().modeSynced) {
-          useUi.getState().markModeSynced(payload.settings.mode === "ask" ? "ask" : "agent");
+          useUi.getState().markModeSynced(normalizeRunMode(payload.settings.mode));
         }
-        if (payload.settings.workspacePath) setWorkspace(payload.settings.workspacePath);
+        const [home, desktop] = await Promise.all([api.computerHome(), api.computerDesktop()]);
+        useSession.getState().setComputerHome(home);
+        useSession.getState().setDesktopPath(desktop);
+        const saved = payload.settings.workspacePath;
+        setWorkspace(saved && !samePath(saved, desktop) ? saved : desktop);
         const [conversations, workspaces] = await Promise.all([api.listConversations(), api.listWorkspaces()]);
         setConversations(conversations);
         setWorkspaces(workspaces);
@@ -82,7 +95,7 @@ export function App() {
         if (ready.model && current.model !== ready.model) {
           setSettings({ ...current, model: ready.model });
         }
-        setOllama(ready.online, "Ollama에 연결되었습니다.", ready.models);
+        setOllama(ready.online, "Connected to Ollama.", ready.models);
         setBoot("ready");
       } catch (error) {
         const message = explain(error);
@@ -102,6 +115,25 @@ export function App() {
   }, [applyEvent, setBanner, setConversations, setOllama, setSettings, setWorkspace, setWorkspaces]);
 
   useEffect(() => {
+    let stop = () => {};
+    try {
+      void getCurrentWebview()
+        .onDragDropEvent((event) => {
+          if (event.payload.type === "drop") {
+            useSession.getState().setAttachments(event.payload.paths);
+          }
+        })
+        .then((unlisten) => {
+          stop = unlisten;
+        })
+        .catch(() => undefined);
+    } catch {
+      return;
+    }
+    return () => stop();
+  }, []);
+
+  useEffect(() => {
     if (boot !== "ready") return;
     let cancelled = false;
     void findUpdate()
@@ -112,7 +144,7 @@ export function App() {
         }
         const version = update.version;
         await update.close();
-        if (!cancelled) setNotice(`버전 ${version} 업데이트가 있습니다. 설정에서 설치할 수 있습니다.`);
+        if (!cancelled) setNotice(translate(useUi.getState().language, "Update {version} is available. You can install it in Settings.", { version }));
       })
       .catch(() => undefined);
     return () => {
@@ -138,7 +170,9 @@ export function App() {
         setView("chat");
       } else if (meta && event.key.toLowerCase() === "o" && !event.shiftKey) {
         event.preventDefault();
-        void selectWorkspace();
+        void selectWorkspace().then((path) => {
+          if (path) newTask(path);
+        });
       } else if (meta && event.key.toLowerCase() === "j") {
         event.preventDefault();
         patchUi({ taskOpen: !useUi.getState().taskOpen });
@@ -173,19 +207,18 @@ export function App() {
       const ui = useUi.getState();
       const session = useSession.getState();
       const settings = useSettings.getState().settings;
-      if (isRunning(session.agentState) || !settings.model) return;
+      if (isRunning(session.agentState) || session.automationWatch || session.proposal || !settings.model) return;
       const now = Date.now();
-      const due = ui.automations.find((item) => item.enabled && item.workspacePath && now - item.lastRun >= cadenceMs(item.cadence));
+      const due = ui.automations.find((item) => automationDue(item, now));
       if (!due) return;
-      ui.markAutomation(due.id, now);
+      const background = session.messages.length > 0 || Boolean(session.conversationId);
+      session.setAutomationWatch({ id: due.id, background });
       void (async () => {
         try {
-          session.setWorkspace(due.workspacePath);
-          session.pushUser(due.prompt);
           const started = await api.startTask({
             conversationId: null,
             goal: due.prompt,
-            mode: "agent",
+            mode: "mission",
             workspacePath: due.workspacePath,
             approval: ui.approval,
             effort: ui.effort,
@@ -196,13 +229,24 @@ export function App() {
               goal: "",
               skills: allSkills(ui.skills),
               enabledPlugins: ui.enabledPlugins,
+              language: ui.language,
+              scope: scopeInstructions(
+                isPlainChat(due.workspacePath, session.desktopPath),
+                due.workspacePath.split("/").filter(Boolean).at(-1) ?? "Folder",
+              ),
             }),
           });
-          session.beginRun(started.conversationId, started.taskId);
-          session.setConversations(await api.listConversations());
-          ui.setNotice(`자동화 실행 · ${due.name}`);
-          session.setView("chat");
+          ui.setNotice(translate(ui.language, "Automation started · {name}", { name: due.name }));
+          if (!background) {
+            session.setWorkspace(due.workspacePath);
+            session.pushUser(due.prompt);
+            session.beginRun(started.conversationId, started.taskId);
+            session.setConversations(await api.listConversations());
+            session.setView("chat");
+          }
         } catch (error) {
+          session.setAutomationWatch(null);
+          ui.finishAutomation(due.id, false);
           session.setBanner(explain(error));
         }
       })();
@@ -210,7 +254,15 @@ export function App() {
     return () => window.clearInterval(timer);
   }, []);
 
+  const automations = useUi((state) => state.automations);
+  useEffect(() => {
+    void api.setRunsInBackground(automations.some((item) => item.enabled)).catch(() => undefined);
+  }, [automations]);
+
   const empty = view === "chat" && messages.length === 0;
+  const plainChat = isPlainChat(workspacePath, desktopPath);
+  const rawFolder = headerTitle(workspacePath, desktopPath);
+  const folderName = rawFolder === "Folder" || rawFolder === "Chat" ? t(rawFolder) : rawFolder;
 
   return (
     <div className="relative flex h-full bg-ink text-text" style={{ fontSize: `${14 * fontScale}px` }}>
@@ -222,13 +274,20 @@ export function App() {
               <IconSidebar />
             </button>
           )}
-          <div className="min-w-0 flex-1 truncate text-[13px] text-muted">{workspacePath ? shorten(workspacePath) : "프로젝트 없음"}</div>
+          <div className="min-w-0 flex-1 truncate text-[13px] text-muted">
+            {plainChat ? t("Chat · Desktop") : folderName}
+          </div>
+          {view === "chat" && !plainChat ? (
+            <button className="rounded-md px-2 py-1 text-xs text-muted hover:bg-elev hover:text-text" onClick={() => newTask()}>
+              {t("Back to chat")}
+            </button>
+          ) : null}
           {view === "chat" ? (
             <button className="rounded-md px-2 py-1 text-xs text-muted hover:bg-elev hover:text-text" onClick={() => patchUi({ taskOpen: !taskOpen })}>
-              {taskOpen ? "패널 닫기" : "패널"}
+              {taskOpen ? t("Close panel") : t("Panel")}
             </button>
           ) : (
-            <button className="flex h-8 w-8 items-center justify-center rounded-md text-muted hover:bg-elev hover:text-text" title="닫기" onClick={() => setView("chat")}>
+            <button className="flex h-8 w-8 items-center justify-center rounded-md text-muted hover:bg-elev hover:text-text" title={t("Close")} onClick={() => setView("chat")}>
               <IconClose />
             </button>
           )}
@@ -248,7 +307,12 @@ export function App() {
           empty ? (
             <div className="flex flex-1 flex-col items-center justify-center px-6 pb-10">
               <Logo className="mb-5 h-14 w-14" />
-              <h1 className="mb-6 text-center text-[32px] font-medium tracking-[-0.03em]">무엇을 작업할까요?</h1>
+              <h1 className="text-center text-[32px] font-medium tracking-[-0.03em]">
+                {plainChat ? t("What should we look at?") : t("What should we do in {folder}?", { folder: folderName })}
+              </h1>
+              <p className="mb-6 mt-2 text-center text-sm text-muted">
+                {plainChat ? t("New files go on the Desktop.") : t("Files change only inside this folder.")}
+              </p>
               <Composer centered />
             </div>
           ) : (
@@ -277,7 +341,7 @@ export function App() {
                 if (ready.model && current.model !== ready.model) {
                   setSettings({ ...current, model: ready.model });
                 }
-                setOllama(ready.online, "Ollama에 연결되었습니다.", ready.models);
+                setOllama(ready.online, "Connected to Ollama.", ready.models);
                 setBoot("ready");
               })
               .catch((error) => {
@@ -293,8 +357,8 @@ export function App() {
   );
 }
 
-function shorten(path: string): string {
-  const home = path.replace(/^\/Users\/[^/]+/, "~");
-  const name = home.split("/").filter(Boolean).at(-1) ?? home;
-  return name;
+function headerTitle(path: string | null, desktop: string | null): string {
+  if (isPlainChat(path, desktop)) return "Chat";
+  const shortened = (path ?? "").replace(/^\/Users\/[^/]+/, "~");
+  return shortened.split("/").filter(Boolean).at(-1) ?? "Folder";
 }

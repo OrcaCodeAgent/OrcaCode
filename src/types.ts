@@ -54,7 +54,7 @@ export interface Settings {
   autoApproveFileEdits: boolean;
   terminalTimeoutMs: number;
   systemPrompt: string;
-  mode: "agent" | "ask";
+  mode: "agent" | "ask" | "do" | "mission" | "plan";
   workspacePath: string | null;
 }
 

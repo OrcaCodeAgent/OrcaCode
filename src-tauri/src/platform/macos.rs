@@ -12,11 +12,11 @@ pub fn open_accessibility_settings() -> Result<(), String> {
     let status = Command::new("open")
         .arg("x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility")
         .status()
-        .map_err(|error| format!("시스템 설정을 열지 못했습니다: {error}"))?;
+        .map_err(|error| format!("Could not open System Settings: {error}"))?;
     if status.success() {
         Ok(())
     } else {
-        Err("시스템 설정을 열지 못했습니다.".into())
+        Err("Could not open System Settings.".into())
     }
 }
 
@@ -41,7 +41,7 @@ pub fn scroll(x: f64, y: f64, dy: i32) -> Result<(), String> {
     unsafe {
         let event = CGEventCreate(std::ptr::null_mut());
         if event.is_null() {
-            return Err("스크롤 이벤트를 만들지 못했습니다.".into());
+            return Err("Could not create a scroll event.".into());
         }
         CGEventSetType(event, 22);
         CGEventSetLocation(event, CGPoint { x, y });
@@ -56,7 +56,7 @@ pub fn scroll(x: f64, y: f64, dy: i32) -> Result<(), String> {
 pub fn keystroke(text: &str) -> Result<(), String> {
     ensure_access()?;
     if text.chars().count() > 2_000 {
-        return Err("한 번에 입력할 수 있는 글자 수를 넘었습니다.".into());
+        return Err("The text is longer than one input can send.".into());
     }
     let script = format!(
         "tell application \"System Events\" to keystroke \"{}\"",
@@ -90,7 +90,7 @@ pub fn shortcut(key: &str, modifiers: &[String]) -> Result<(), String> {
             applescript_escape(key)
         )
     } else {
-        return Err("지원하지 않는 키입니다.".into());
+        return Err("That key is not supported.".into());
     };
     run_osascript(&script)
 }
@@ -99,7 +99,7 @@ fn ensure_access() -> Result<(), String> {
     if accessibility_trusted() {
         Ok(())
     } else {
-        Err("손쉬운 사용 권한이 없습니다. 설정에서 Orca Code를 허용한 뒤 다시 시도해주세요.".into())
+        Err("Accessibility permission is missing. Allow Orca in Settings and try again.".into())
     }
 }
 
@@ -107,7 +107,7 @@ fn post_mouse(kind: u32, x: f64, y: f64, button: u32) -> Result<(), String> {
     unsafe {
         let event = CGEventCreateMouseEvent(std::ptr::null_mut(), kind, CGPoint { x, y }, button);
         if event.is_null() {
-            return Err("마우스 이벤트를 만들지 못했습니다.".into());
+            return Err("Could not create a mouse event.".into());
         }
         CGEventPost(0, event);
         CFRelease(event);
@@ -120,13 +120,13 @@ fn run_osascript(script: &str) -> Result<(), String> {
         .arg("-e")
         .arg(script)
         .output()
-        .map_err(|error| format!("AppleScript를 실행하지 못했습니다: {error}"))?;
+        .map_err(|error| format!("Could not run AppleScript: {error}"))?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         crate::logging::log_line("error", &format!("osascript: {stderr}"));
-        Err("키보드 입력을 전달하지 못했습니다. 손쉬운 사용 권한을 확인해주세요.".into())
+        Err("Could not send keyboard input. Check Accessibility permission.".into())
     }
 }
 
